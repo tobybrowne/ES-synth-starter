@@ -1,3 +1,5 @@
+// #define SENDER
+
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <bitset>
@@ -138,6 +140,39 @@ void decodeTask(void * pvParameters)
     // blocks until data is available
     // yields the CPU to other tasks in the meantime
     xQueueReceive(msgInQ, RX_Message, portMAX_DELAY);
+
+    #ifndef SENDER
+      uint8_t action = RX_Message[0];
+      uint8_t octave = RX_Message[0];
+      uint8_t key = RX_Message[0];
+      uint32_t stepSize = stepSizes[key] << octave;
+      
+      // key press
+      if(RX_Message[0] == 'P')
+      {
+        for(int i = 0; i < CHANNELS; i++)
+        {
+          // can only play if we have available channels
+          if(currentStepSize[i] == 0)
+          {
+            currentStepSize[i] = stepSize;
+          }
+        } 
+      }
+
+      // key release
+      if(RX_Message[0] == 'R')
+      {
+        for(int i = 0; i < CHANNELS; i++)
+        {
+          if(currentStepSize[i] == stepSize)
+          {
+            currentStepSize[i] = 0;
+          }
+        } 
+      }
+      
+    #endif
   }
 }
 
@@ -204,53 +239,55 @@ void scanKeysTask(void * pvParameters)
       }
     } 
 
-    // check for releases
-    for(int i = 0; i < CHANNELS; i++)
-    {
-      bool found = false;
-      // sysState
-      for(int j = 0; j < CHANNELS; j++)
+    #ifdef SENDER
+      // check for releases
+      for(int i = 0; i < CHANNELS; i++)
       {
-        // keyPressed_local
-        if(sysState.keyPressed[i] == keyPressed_local[j])
-        {
-          found = true;
-        }
-      }
-
-      if(!found)
-      {
-        TX_Message[0] = 'R';
-        TX_Message[1] = octaveKnob.getValue();
-        TX_Message[2] = sysState.keyPressed[i];
-        xQueueSend( msgOutQ, TX_Message, portMAX_DELAY);
-        // CAN_TX(0x123, TX_Message);
-      }
-    }
-
-    // check for new presses
-    for(int i = 0; i < CHANNELS; i++)
-    {
-      bool found = false;
-      // keyPressed_local
-      for(int j = 0; j < CHANNELS; j++)
-      {
+        bool found = false;
         // sysState
-        if(sysState.keyPressed[j] == keyPressed_local[i])
+        for(int j = 0; j < CHANNELS; j++)
         {
-          found = true;
+          // keyPressed_local
+          if(sysState.keyPressed[i] == keyPressed_local[j])
+          {
+            found = true;
+          }
+        }
+
+        if(!found)
+        {
+          TX_Message[0] = 'R';
+          TX_Message[1] = octaveKnob.getValue();
+          TX_Message[2] = sysState.keyPressed[i];
+          xQueueSend( msgOutQ, TX_Message, portMAX_DELAY);
+          // CAN_TX(0x123, TX_Message);
         }
       }
 
-      if(!found)
+      // check for new presses
+      for(int i = 0; i < CHANNELS; i++)
       {
-        TX_Message[0] = 'P';
-        TX_Message[1] = octaveKnob.getValue();
-        TX_Message[2] = keyPressed_local[i];
-        xQueueSend( msgOutQ, TX_Message, portMAX_DELAY);
-        // CAN_TX(0x123, TX_Message);
+        bool found = false;
+        // keyPressed_local
+        for(int j = 0; j < CHANNELS; j++)
+        {
+          // sysState
+          if(sysState.keyPressed[j] == keyPressed_local[i])
+          {
+            found = true;
+          }
+        }
+
+        if(!found)
+        {
+          TX_Message[0] = 'P';
+          TX_Message[1] = octaveKnob.getValue();
+          TX_Message[2] = keyPressed_local[i];
+          xQueueSend( msgOutQ, TX_Message, portMAX_DELAY);
+          // CAN_TX(0x123, TX_Message);
+        }
       }
-    }
+    #endif
       
     // check knob rotation (knob 3)
     volumeKnob.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
@@ -483,10 +520,13 @@ void setup() {
   Serial.begin(9600);
   Serial.println("Hello World");
 
-  // initialise sampling interrupt (22,000 times a sec)
-  sampleTimer.setOverflow(22000, HERTZ_FORMAT);
-  sampleTimer.attachInterrupt(sampleISR);
-  sampleTimer.resume();
+  // only receivers should play their notes
+  #ifndef SENDER
+    // initialise sampling interrupt (22,000 times a sec)
+    sampleTimer.setOverflow(22000, HERTZ_FORMAT);
+    sampleTimer.attachInterrupt(sampleISR);
+    sampleTimer.resume();
+  #endif
 
   // init CAN bus
   CAN_Init(true); // true means it reads it's OWN CAN output
