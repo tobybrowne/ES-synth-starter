@@ -56,9 +56,9 @@
 
   Knob volumeKnob = Knob(0, 8, 5);
   Knob octaveKnob = Knob(0, 8, 0);
-  Knob waveKnob = Knob(0, 1, 0);
+  Knob waveKnob = Knob(0, 2, 0);
 
-  const char* waveTypes[2] = {"Sawtooth", "Sine"};
+  const char* waveTypes[3] = {"Saw", "Sine", "Square"};
 
   // stores the current step size that should be played
   volatile uint32_t currentStepSize[CHANNELS];
@@ -283,23 +283,6 @@ void displayUpdateTask(void * pvParameters)
   } 
 }
 
-int8_t compute_sine(uint32_t phase)
-{
-  // converts value from 0->2^32 to 0->SIN_RESOLUTION for use with the lookup table
-  // 
-  //int angle = (phase * SINE_RESOLUTION) >> 32;
-  // int angle = (phase >> 24) & 0xFF;
-  // Serial.println(phase);
-  //int angle = std::round(static_cast<double>(phase) * SINE_RESOLUTION / 4294967295.0);
-  // Serial.println(angle);
-  // int angle = (phase * SINE_RESOLUTION) >> 32;
-  
-  // hard programmed for 256 sine lookup table
-  int angle = (phase >> (32 - SINE_RESOLUTION_BITS)) & 0xFF;  // Shift phase and mask to get a value between 0 and 255
-
-  return sineLookup[angle];
-}
-
 
 // ISR that runs 22,000 times per sec
 // TODO: read systate and csurrentStepSize atomically
@@ -308,21 +291,28 @@ void sampleISR()
   // will be filled with 0s
   static uint32_t phaseAcc[CHANNELS] = {0}; // this declaration only happens once
   int32_t Vout = 0; // declaration happens everytime
+  int waveType = waveKnob.getValue();
   
   for(int i = 0; i < CHANNELS; i++)
   {
     phaseAcc[i] += currentStepSize[i];
 
-    // sine wave
-    if(waveKnob.getValue())
-    {
-      Vout += compute_sine(phaseAcc[i]);
-      // Vout += (phaseAcc[i] >> 24) - 128;
-    }
     // sawtooth wave
-    else
+    if(waveType == 0)
     {
       Vout += (phaseAcc[i] >> 24) - 128;
+    }
+    // sine wave
+    else if(waveType == 1)
+    {
+      int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF;  // Shift phase and mask to get a value between 0 and 255
+      Vout += sineLookup[angle];
+    }
+    // square wave
+    else if(waveType == 2)
+    {
+      int threshold = (phaseAcc[i] > (1 << 31));
+      Vout += (threshold * 256) - 128;
     }
   }
 
