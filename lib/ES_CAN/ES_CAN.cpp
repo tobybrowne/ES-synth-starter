@@ -1,7 +1,9 @@
+#include "stm32l4xx_hal.h"
 #include <stm32l4xx_hal_can.h>
 #include <stm32l4xx_hal_rcc.h>
 #include <stm32l4xx_hal_gpio.h>
 #include <stm32l4xx_hal_cortex.h>
+
 
 //Overwrite the weak default IRQ Handlers and callabcks
 extern "C" void CAN1_RX0_IRQHandler(void);
