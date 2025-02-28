@@ -45,6 +45,9 @@
   // how many keys can be pressed together
   const int CHANNELS = 4;
 
+  // CAN RX msg buffer
+  QueueHandle_t msgInQ;
+
   // store inputs state
   struct
   {
@@ -63,8 +66,9 @@
   volatile uint32_t currentStepSize[CHANNELS];
 
   // CAN OUT message
-  // TODO: make this just a local inside scankeys (stop displaying on screen)
+  // TODO: make these memory safe by moving into sysState (described in Lab2)
   uint8_t TX_Message[8] = {0};
+  uint8_t RX_Message[8] = {0};
 
   // generate step sizes for each key's note
   // frequencies for octave 0
@@ -120,6 +124,24 @@ std::bitset<4> readCols()
   return_set[3] = digitalRead(C3_PIN);
 
   return return_set;
+}
+
+// task to decode CAN messages in the RX buffer
+void decodeTask(void * pvParameters)
+{
+  while(1)
+  {
+    // blocks until data is available
+    // yields the CPU to other tasks in the meantime
+    xQueueReceive(msgInQ, RX_Message, portMAX_DELAY);
+  }
+}
+
+void CAN_RX_ISR (void) {
+	uint8_t RX_Message_ISR[8];
+	uint32_t ID;
+	CAN_RX(ID, RX_Message_ISR);
+	xQueueSendFromISR(msgInQ, RX_Message_ISR, NULL);
 }
 
 // task to check keys pressed every 50ms
@@ -247,6 +269,8 @@ void scanKeysTask(void * pvParameters)
   } 
 }
 
+
+
 // task to update OLED display every 100ms
 void displayUpdateTask(void * pvParameters)
 {
@@ -287,12 +311,7 @@ void displayUpdateTask(void * pvParameters)
     u8g2.print("Vol: ");
     u8g2.print(volumeKnob.getValue());
 
-    // scan for CAN input
-    uint32_t ID;
-    uint8_t RX_Message[8] = {0};
-    while (CAN_CheckRXLevel())
-      CAN_RX(ID, RX_Message);
-
+    // display last received CAN message
     u8g2.setCursor(66,30);
     u8g2.print((char) RX_Message[0]);
     u8g2.print(RX_Message[1]);
@@ -358,6 +377,9 @@ void setup() {
   // create systate mutex
   sysState.mutex = xSemaphoreCreateMutex();
 
+  // init CAN RX buffer (36 8 byte messages)
+  msgInQ = xQueueCreate(36,8);
+
   // start key scanning thread
   TaskHandle_t scanKeysHandle = NULL;
   xTaskCreate(
@@ -378,6 +400,18 @@ void setup() {
   1,			/* Task priority */
   &displayUpdate );	/* Pointer to store the task handle */
 
+  // TODO: check if this stasck size is too much
+  // TODO: check task priority
+  // start decode CAN message thread
+  TaskHandle_t decode = NULL;
+  xTaskCreate(
+  decodeTask,		/* Function that implements the task */
+  "decode",		/* Text name for the task */
+  256,      		/* Stack size in words, not bytes */
+  NULL,			/* Parameter passed into the task */
+  3,			/* Task priority */
+  &decode );	/* Pointer to store the task handle */
+  
   // compute 256 sine values
   uint32_t phase = 0;
   while(phase < SINE_RESOLUTION)
@@ -385,7 +419,6 @@ void setup() {
     sineLookup[phase] = std::round(127 * std::sin((2*M_PI*phase)/SINE_RESOLUTION));
     phase++;
   }
-
 
   //Set pin directions
   pinMode(RA0_PIN, OUTPUT);
@@ -423,6 +456,10 @@ void setup() {
   // init CAN bus
   CAN_Init(true); // true means it reads it's OWN CAN output
   setCANFilter(0x123,0x7ff);
+
+  // bind ISR to CAN RX event
+  CAN_RegisterRX_ISR(CAN_RX_ISR);
+
   CAN_Start();
 
   // start RTOS scheduler
