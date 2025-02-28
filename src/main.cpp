@@ -158,7 +158,7 @@ class Knob
 
   // stores sine wave with 256 x-values with amplitude 127 to -127
   // surely sine resolution above 256 makes no sense
-  const int SINE_RESOLUTION = 512;
+  const int SINE_RESOLUTION = 256;
   int sineLookup[SINE_RESOLUTION];
 
 
@@ -348,10 +348,14 @@ void displayUpdateTask(void * pvParameters)
   } 
 }
 
-int8_t compute_sine(int32_t phase)
+int8_t compute_sine(uint32_t phase)
 {
-  // converts value from 0->2^32 to 0->256 for use with the lookup table
-  int angle = (phase >> 24) & 0xFF;
+  // converts value from 0->2^32 to 0->SIN_RESOLUTION for use with the lookup table
+  // int angle = (phase * SINE_RESOLUTION) >> 32;
+  // int angle = (phase >> 24) & 0xFF;
+  // Serial.println(phase);
+  int angle = std::round(static_cast<double>(phase) * SINE_RESOLUTION / 4294967295.0);
+  // Serial.println(angle);
 
   // Compute sine value and scale to the range [-127, 127]
   int8_t sine_value = sineLookup[angle];
@@ -361,7 +365,7 @@ int8_t compute_sine(int32_t phase)
 
 
 // ISR that runs 22,000 times per sec
-// TODO: read systate and currentStepSize atomically
+// TODO: read systate and csurrentStepSize atomically
 void sampleISR()
 {
   // phaseAcc is increased and then overflows many times a second (a wave)
@@ -381,7 +385,7 @@ void sampleISR()
   {
     Vout = (phaseAcc >> 24) - 128;
   }
-  
+
   // log-taper volume control
   Vout = Vout >> (8 - volumeKnob.getValue());
 
@@ -423,7 +427,7 @@ void setup() {
   uint32_t phase = 0;
   while(phase < SINE_RESOLUTION)
   {
-    sineLookup[phase] = std::round(127 * std::sin((2*M_PI*phase)/256));
+    sineLookup[phase] = std::round(127 * std::sin((2*M_PI*phase)/SINE_RESOLUTION));
     phase++;
   }
 
