@@ -47,6 +47,10 @@
 
   // CAN RX msg buffer
   QueueHandle_t msgInQ;
+  QueueHandle_t msgOutQ;
+
+  // controls acccess to the CAN mailboxes (hardware has 3)
+  SemaphoreHandle_t CAN_TX_Semaphore;
 
   // store inputs state
   struct
@@ -219,7 +223,8 @@ void scanKeysTask(void * pvParameters)
         TX_Message[0] = 'R';
         TX_Message[1] = octaveKnob.getValue();
         TX_Message[2] = sysState.keyPressed[i];
-        CAN_TX(0x123, TX_Message);
+        xQueueSend( msgOutQ, TX_Message, portMAX_DELAY);
+        // CAN_TX(0x123, TX_Message);
       }
     }
 
@@ -242,7 +247,8 @@ void scanKeysTask(void * pvParameters)
         TX_Message[0] = 'P';
         TX_Message[1] = octaveKnob.getValue();
         TX_Message[2] = keyPressed_local[i];
-        CAN_TX(0x123, TX_Message);
+        xQueueSend( msgOutQ, TX_Message, portMAX_DELAY);
+        // CAN_TX(0x123, TX_Message);
       }
     }
       
@@ -366,6 +372,21 @@ void sampleISR()
   analogWrite(OUTR_PIN, Vout);
 }
 
+// scan TX mailbox and wait until a mailbox is available
+void canSendTask (void * pvParameters) {
+	uint8_t msgOut[8];
+	while (1) {
+		xQueueReceive(msgOutQ, msgOut, portMAX_DELAY);
+		xSemaphoreTake(CAN_TX_Semaphore, portMAX_DELAY);
+		CAN_TX(0x123, msgOut);
+	}
+}
+
+// frees CAN semaphore when mailbox is available
+void CAN_TX_ISR (void) {
+	xSemaphoreGiveFromISR(CAN_TX_Semaphore, NULL);
+}
+
 void setup() {
   // put your setup code here, to run once:
 
@@ -377,8 +398,13 @@ void setup() {
   // create systate mutex
   sysState.mutex = xSemaphoreCreateMutex();
 
+  // init CAN mailbox semaphore
+  CAN_TX_Semaphore = xSemaphoreCreateCounting(3,3);
+
   // init CAN RX buffer (36 8 byte messages)
   msgInQ = xQueueCreate(36,8);
+  // init CAN TX buffer (36 8 byte messages)
+  msgOutQ = xQueueCreate(36,8);
 
   // start key scanning thread
   TaskHandle_t scanKeysHandle = NULL;
@@ -411,6 +437,15 @@ void setup() {
   NULL,			/* Parameter passed into the task */
   3,			/* Task priority */
   &decode );	/* Pointer to store the task handle */
+
+  TaskHandle_t canSend = NULL;
+  xTaskCreate(
+  canSendTask,		/* Function that implements the task */
+  "canSend",		/* Text name for the task */
+  256,      		/* Stack size in words, not bytes */
+  NULL,			/* Parameter passed into the task */
+  3,			/* Task priority */
+  &canSend );	/* Pointer to store the task handle */
   
   // compute 256 sine values
   uint32_t phase = 0;
@@ -459,6 +494,9 @@ void setup() {
 
   // bind ISR to CAN RX event
   CAN_RegisterRX_ISR(CAN_RX_ISR);
+
+  // bind ISR to CAN MAILBOX FREE event
+  CAN_RegisterTX_ISR(CAN_TX_ISR);
 
   CAN_Start();
 
