@@ -2,6 +2,101 @@
 #include <U8g2lib.h>
 #include <bitset>
 #include <STM32FreeRTOS.h>
+#include <math.h>
+
+// WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
+// HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
+// THE 
+
+// #include <ES_CAN.h>
+
+// Remember Knob is accessed from a ISR so no MUTEX!
+// is this right to not use a mutex (is atomic ops sufficient?)
+class Knob
+{
+  public: 
+    int max;
+    int min;
+    int value = 0;
+    int valueNext = 0;
+
+    int lastA = 0;
+    int lastB = 0;
+    int lastTrans = 0;
+    
+    Knob(int _min, int _max, int _initVal)
+    {
+      max = _max;
+      min = _min;
+      value = _initVal;
+      valueNext = value;
+    }
+
+    void updateQuadInputs(int currentA, int currentB)
+    {
+      int current_state = (currentA << 1) | currentB; // Combine A and B into a 2-bit state
+      int prev_state = (lastA << 1) | lastB; // Combine previous A and B into a 2-bit state
+      
+      int trans = 0;
+
+      switch (prev_state)
+      {
+        case 0b00:
+          if (current_state == 0b00);
+          else if (current_state == 0b01) trans--;
+          else if (current_state == 0b10);
+          else if (current_state == 0b11) trans = lastTrans;
+          break;
+        case 0b01:
+          if (current_state == 0b00) trans++;
+          else if (current_state == 0b01);
+          else if (current_state == 0b10) trans = lastTrans;
+          else if (current_state == 0b11);
+          break;
+        case 0b10:
+          if (current_state == 0b00) trans = lastTrans;
+          else if (current_state == 0b01);
+          else if (current_state == 0b10);
+          else if (current_state == 0b11) trans++;
+          break;
+        case 0b11:
+          if (current_state == 0b00) trans = lastTrans;
+          else if (current_state == 0b01);
+          else if (current_state == 0b10) trans--;
+          else if (current_state == 0b11);
+          break;
+      }
+
+      lastA = currentA;
+      lastB = currentB;
+
+      valueNext += trans;
+
+      // limit knob between 0 and 8
+      if(valueNext > max)
+      {
+        valueNext = max;
+      }
+      else if(valueNext < min)
+      {
+        valueNext = min;
+      }
+
+      if(trans != 0)
+      {
+        lastTrans = trans;
+      } 
+
+      // atomic store, because knob value can be accessed from ISR
+      __atomic_store_n(&value, valueNext, __ATOMIC_RELAXED);
+    }
+
+    // atomic load but no mutex acquired (so can be called from ISR)
+    int getValue()
+    {
+      return __atomic_load_n(&value, __ATOMIC_RELAXED);
+    }
+};
 
 //Constants
   const uint32_t interval = 100; //Display update interval
@@ -35,16 +130,37 @@
   const int HKOE_BIT = 6;
 
   // store inputs state
-  struct {
-    std::bitset<12> inputs;  
-    } sysState;
+  struct
+  {
+    std::bitset<32> inputs; 
+    int keyPressed = -1;
+    SemaphoreHandle_t mutex; 
+  } sysState;
+
+  Knob volumeKnob = Knob(0, 8, 5);
+  Knob octaveKnob = Knob(0, 8, 0);
+  Knob waveKnob = Knob(0, 1, 0);
+
+  const char* waveTypes[2] = {"Sawtooth", "Sine"};
 
   // stores the current step size that should be played
   volatile uint32_t currentStepSize;
 
+  // CAN OUT message
+  // TODO: make this just a local inside scankeys (stop displaying on screen)
+  uint8_t TX_Message[8] = {0};
+
   // generate step sizes for each key's note
-  const int keyFreqs [12] = {131, 139, 147, 156, 165, 175, 185, 196, 208, 220, 233, 247};
+  // frequencies for octave 0
+  const int keyFreqs[12] = {65, 69, 73, 78, 82, 87, 93, 98, 104, 110, 116, 123};
+  const char* keyNames [12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
   uint32_t stepSizes[12];
+
+  // stores sine wave with 256 x-values with amplitude 127 to -127
+  // surely sine resolution above 256 makes no sense
+  const int SINE_RESOLUTION = 512;
+  int sineLookup[SINE_RESOLUTION];
+
 
 //Display driver objects
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
@@ -54,14 +170,14 @@ HardwareTimer sampleTimer(TIM1);
 
 //Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value) {
-      digitalWrite(REN_PIN,LOW);
-      digitalWrite(RA0_PIN, bitIdx & 0x01);
-      digitalWrite(RA1_PIN, bitIdx & 0x02);
-      digitalWrite(RA2_PIN, bitIdx & 0x04);
-      digitalWrite(OUT_PIN,value);
-      digitalWrite(REN_PIN,HIGH);
-      delayMicroseconds(2);
-      digitalWrite(REN_PIN,LOW);
+  digitalWrite(REN_PIN,LOW);
+  digitalWrite(RA0_PIN, bitIdx & 0x01);
+  digitalWrite(RA1_PIN, bitIdx & 0x02);
+  digitalWrite(RA2_PIN, bitIdx & 0x04);
+  digitalWrite(OUT_PIN,value);
+  digitalWrite(REN_PIN,HIGH);
+  delayMicroseconds(2);
+  digitalWrite(REN_PIN,LOW);
 }
 
 void setRow(uint8_t rowIdx)
@@ -93,19 +209,25 @@ std::bitset<4> readCols()
 // task to check keys pressed every 50ms
 void scanKeysTask(void * pvParameters)
 {
-  const TickType_t xFrequency = 50/portTICK_PERIOD_MS;
+  const TickType_t xFrequency = 20/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
-
+  int lastKeyPressed = -1;
+  
   while(1)
   {
     // ensures we sample keyboard only every 50ms
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
+    // take systate mutex
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+
     // ensures we only access the actual variable once per loop
-    uint32_t currentStepSize_local;
+    uint32_t currentStepSize_local = 0;
+
+    int keyPressed = -1;
   
-    // loop through each row
-    for(int i = 0; i <= 2; i++ )
+    // get all 32 inputs
+    for(int i = 0; i < 8; i++ )
     {
       setRow(i);
       delayMicroseconds(3);
@@ -115,20 +237,53 @@ void scanKeysTask(void * pvParameters)
       for(int j = 0; j < 4; j++)
       {
         sysState.inputs[start_id + j] = columns[j];
-  
-        // play note if pressed
-        if(columns[j] == 0)
-        {
-          currentStepSize_local = stepSizes[start_id + j];
-        }
       }  
     }
-  
-    // if no keys pressed
-    if (sysState.inputs.all())
+
+    // check keyboard presses
+    for(int i = 0; i < 12; i++)
     {
-      currentStepSize_local = 0;
+      if(sysState.inputs[i] == 0)
+      {
+        // each octave the frequencies are doubled
+        currentStepSize_local = stepSizes[i] << octaveKnob.getValue();
+        // currentStepSize_local = stepSizes[i];
+        keyPressed = i;
+      }
+    } 
+
+    // check if key changed
+    if(keyPressed != lastKeyPressed)
+    {
+      // key release to nothing
+      if(keyPressed == -1)
+      {
+        TX_Message[0] = 'R';
+        TX_Message[1] = octaveKnob.getValue();
+        TX_Message[2] = lastKeyPressed;
+      }
+      // new key pressed
+      else
+      {
+        TX_Message[0] = 'P';
+        TX_Message[1] = octaveKnob.getValue();
+        TX_Message[2] = keyPressed;
+      }
+
+      // send message down CAN bus
+      //CAN_TX(0x123, TX_Message);
     }
+
+    lastKeyPressed = keyPressed;
+    sysState.keyPressed = keyPressed;
+      
+    // check knob rotation (knob 3)
+    volumeKnob.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
+    octaveKnob.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
+    waveKnob.updateQuadInputs(sysState.inputs[16], sysState.inputs[17]);
+
+    // release systate mutex
+    xSemaphoreGive(sysState.mutex);
   
     // atomic write to currentStepSize global
     __atomic_store_n(&currentStepSize, currentStepSize_local, __ATOMIC_RELAXED);
@@ -146,32 +301,90 @@ void displayUpdateTask(void * pvParameters)
     // ensures we update screen every 100ms
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
+    // take systate mutex
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+
     //Update display
     u8g2.clearBuffer();         // clear the internal memory
     u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-    u8g2.drawStr(2,10,"Jamie You Gimp.");  // write something to the internal memory
+    
+    u8g2.setCursor(2,10);
+    u8g2.print("Key Pressed: ");  // write something to the internal memory
+    if(sysState.keyPressed != -1)
+    {
+      u8g2.print(keyNames[sysState.keyPressed]);
+    }
+
+    
 
     u8g2.setCursor(2,20);
-    u8g2.print(sysState.inputs.to_ulong(), BIN);
+    u8g2.print("Octave: ");
+    u8g2.print(octaveKnob.getValue());
+    u8g2.print("  Wave: ");
+    u8g2.print(waveTypes[waveKnob.getValue()]);
 
     u8g2.setCursor(2,30);
-    u8g2.print(currentStepSize);
+    u8g2.print("Volume: ");
+    u8g2.print(volumeKnob.getValue());
+
+    // scan for CAN input
+    // uint32_t ID;
+    // uint8_t RX_Message[8] = {0};
+    // while (CAN_CheckRXLevel())
+    //   CAN_RX(ID, RX_Message);
+
+    // u8g2.setCursor(66,30);
+    // u8g2.print((char) RX_Message[0]);
+    // u8g2.print(RX_Message[1]);
+    // u8g2.print(RX_Message[2]);
+
     u8g2.sendBuffer();          // transfer internal memory to the display
 
     //Toggle LED
     digitalToggle(LED_BUILTIN);
+
+    // release systate mutex
+    xSemaphoreGive(sysState.mutex);
   } 
 }
 
+int8_t compute_sine(int32_t phase)
+{
+  // converts value from 0->2^32 to 0->256 for use with the lookup table
+  int angle = (phase >> 24) & 0xFF;
+
+  // Compute sine value and scale to the range [-127, 127]
+  int8_t sine_value = sineLookup[angle];
+
+  return sine_value;
+}
+
+
 // ISR that runs 22,000 times per sec
+// TODO: read systate and currentStepSize atomically
 void sampleISR()
 {
   // phaseAcc is increased and then overflows many times a second (a wave)
   static uint32_t phaseAcc = 0;
   phaseAcc += currentStepSize;
 
-  // sawtooth voltage output depending on the phase of the wave
-  int32_t Vout = (phaseAcc >> 24) - 128;
+  // voltage from -127 to 127
+  int32_t Vout; // later we add 128 to stop -ve voltages
+
+  // sine wave
+  if(waveKnob.getValue())
+  {
+    Vout = compute_sine(phaseAcc);
+  }
+  // sawtooth wave
+  else
+  {
+    Vout = (phaseAcc >> 24) - 128;
+  }
+  
+  // log-taper volume control
+  Vout = Vout >> (8 - volumeKnob.getValue());
+
   analogWrite(OUTR_PIN, Vout + 128);
 }
 
@@ -182,6 +395,9 @@ void setup() {
   for (int i = 0; i < 12; ++i) {
     stepSizes[i] = (uint32_t)(4294967296.0 * keyFreqs[i] / 22000.0);
   }
+
+  // create systate mutex
+  sysState.mutex = xSemaphoreCreateMutex();
 
   // start key scanning thread
   TaskHandle_t scanKeysHandle = NULL;
@@ -202,6 +418,14 @@ void setup() {
   NULL,			/* Parameter passed into the task */
   1,			/* Task priority */
   &displayUpdate );	/* Pointer to store the task handle */
+
+  // compute 256 sine values
+  uint32_t phase = 0;
+  while(phase < SINE_RESOLUTION)
+  {
+    sineLookup[phase] = std::round(127 * std::sin((2*M_PI*phase)/256));
+    phase++;
+  }
 
 
   //Set pin directions
@@ -236,6 +460,11 @@ void setup() {
   sampleTimer.setOverflow(22000, HERTZ_FORMAT);
   sampleTimer.attachInterrupt(sampleISR);
   sampleTimer.resume();
+
+  // init CAN bus
+  // CAN_Init(true); // true means it reads it's OWN CAN output
+  // setCANFilter(0x123,0x7ff);
+  // CAN_Start();
 
   // start RTOS scheduler
   vTaskStartScheduler();
