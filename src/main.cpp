@@ -3,100 +3,14 @@
 #include <bitset>
 #include <STM32FreeRTOS.h>
 #include <math.h>
+#include <knob.h>
 
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
-// THE 
+// THE ISR MAY INTERRUPT A PROCESS AT ANY POINTS, ALWAYS REMEMBER
 
 // #include <ES_CAN.h>
 
-// Remember Knob is accessed from a ISR so no MUTEX!
-// is this right to not use a mutex (is atomic ops sufficient?)
-class Knob
-{
-  public: 
-    int max;
-    int min;
-    int value = 0;
-    int valueNext = 0;
-
-    int lastA = 0;
-    int lastB = 0;
-    int lastTrans = 0;
-    
-    Knob(int _min, int _max, int _initVal)
-    {
-      max = _max;
-      min = _min;
-      value = _initVal;
-      valueNext = value;
-    }
-
-    void updateQuadInputs(int currentA, int currentB)
-    {
-      int current_state = (currentA << 1) | currentB; // Combine A and B into a 2-bit state
-      int prev_state = (lastA << 1) | lastB; // Combine previous A and B into a 2-bit state
-      
-      int trans = 0;
-
-      switch (prev_state)
-      {
-        case 0b00:
-          if (current_state == 0b00);
-          else if (current_state == 0b01) trans--;
-          else if (current_state == 0b10);
-          else if (current_state == 0b11) trans = lastTrans;
-          break;
-        case 0b01:
-          if (current_state == 0b00) trans++;
-          else if (current_state == 0b01);
-          else if (current_state == 0b10) trans = lastTrans;
-          else if (current_state == 0b11);
-          break;
-        case 0b10:
-          if (current_state == 0b00) trans = lastTrans;
-          else if (current_state == 0b01);
-          else if (current_state == 0b10);
-          else if (current_state == 0b11) trans++;
-          break;
-        case 0b11:
-          if (current_state == 0b00) trans = lastTrans;
-          else if (current_state == 0b01);
-          else if (current_state == 0b10) trans--;
-          else if (current_state == 0b11);
-          break;
-      }
-
-      lastA = currentA;
-      lastB = currentB;
-
-      valueNext += trans;
-
-      // limit knob between 0 and 8
-      if(valueNext > max)
-      {
-        valueNext = max;
-      }
-      else if(valueNext < min)
-      {
-        valueNext = min;
-      }
-
-      if(trans != 0)
-      {
-        lastTrans = trans;
-      } 
-
-      // atomic store, because knob value can be accessed from ISR
-      __atomic_store_n(&value, valueNext, __ATOMIC_RELAXED);
-    }
-
-    // atomic load but no mutex acquired (so can be called from ISR)
-    int getValue()
-    {
-      return __atomic_load_n(&value, __ATOMIC_RELAXED);
-    }
-};
 
 //Constants
   const uint32_t interval = 100; //Display update interval
@@ -147,7 +61,7 @@ class Knob
   const char* waveTypes[2] = {"Sawtooth", "Sine"};
 
   // stores the current step size that should be played
-  volatile uint32_t currentStepSize[3];
+  volatile uint32_t currentStepSize[CHANNELS];
 
   // CAN OUT message
   // TODO: make this just a local inside scankeys (stop displaying on screen)
@@ -158,7 +72,6 @@ class Knob
   const int keyFreqs[12] = {65, 69, 73, 78, 82, 87, 93, 98, 104, 110, 116, 123};
   const char* keyNames [12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
   uint32_t stepSizes[12];
-
 
 
   // stores sine wave with 256 x-values with amplitude 127 to -127
