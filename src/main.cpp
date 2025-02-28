@@ -129,11 +129,14 @@ class Knob
   const int HKOW_BIT = 5;
   const int HKOE_BIT = 6;
 
+  // how many keys can be pressed together
+  const int CHANNELS = 4;
+
   // store inputs state
   struct
   {
     std::bitset<32> inputs; 
-    int keyPressed[3] = {-1, -1, -1};
+    int keyPressed[CHANNELS];
     SemaphoreHandle_t mutex; 
   } sysState;
 
@@ -155,6 +158,8 @@ class Knob
   const int keyFreqs[12] = {65, 69, 73, 78, 82, 87, 93, 98, 104, 110, 116, 123};
   const char* keyNames [12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
   uint32_t stepSizes[12];
+
+
 
   // stores sine wave with 256 x-values with amplitude 127 to -127
   // surely sine resolution above 256 makes no sense
@@ -222,9 +227,12 @@ void scanKeysTask(void * pvParameters)
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
 
     // ensures we only access the actual variable once per loop
-    uint32_t currentStepSize_local[3] = {0, 0, 0};
 
-    // int keyPressed = -1;
+    uint32_t currentStepSize_local[CHANNELS] = {0};
+    for(int i = 0; i < CHANNELS; i++)
+    {
+      sysState.keyPressed[i] = -1;
+    }
   
     // get all 32 inputs
     for(int i = 0; i < 8; i++ )
@@ -233,17 +241,12 @@ void scanKeysTask(void * pvParameters)
       delayMicroseconds(3);
       std::bitset<4> columns = readCols();
   
-      int start_id = i*4;
+      int start_id = i * 4;
       for(int j = 0; j < 4; j++)
       {
         sysState.inputs[start_id + j] = columns[j];
       }  
     }
-
-    // clear previous key presses
-    sysState.keyPressed[0] = -1;
-    sysState.keyPressed[1] = -1;
-    sysState.keyPressed[2] = -1;
 
     // check keyboard presses
     int j = 0;
@@ -252,7 +255,7 @@ void scanKeysTask(void * pvParameters)
       if(sysState.inputs[i] == 0) // if key pressed...
       {
         // only three keys at a time
-        if(j < 3)
+        if(j < CHANNELS)
         {
           // each octave the frequencies are doubled
           currentStepSize_local[j] = stepSizes[i] << octaveKnob.getValue();
@@ -299,9 +302,10 @@ void scanKeysTask(void * pvParameters)
   
     // atomic write to currentStepSize global
     // if this process is interrupted its not a big deal right?
-    __atomic_store_n(&currentStepSize[0], currentStepSize_local[0], __ATOMIC_RELAXED);
-    __atomic_store_n(&currentStepSize[1], currentStepSize_local[1], __ATOMIC_RELAXED);
-    __atomic_store_n(&currentStepSize[2], currentStepSize_local[2], __ATOMIC_RELAXED);
+    for(int i = 0; i < CHANNELS; i++)
+    {
+      __atomic_store_n(&currentStepSize[i], currentStepSize_local[i], __ATOMIC_RELAXED);
+    }
   } 
 }
 
@@ -326,7 +330,7 @@ void displayUpdateTask(void * pvParameters)
     u8g2.setCursor(2,10);
     u8g2.print("Key Pressed: ");  // write something to the internal memory
     
-    for(int i = 0; i < 3; i++)
+    for(int i = 0; i < CHANNELS; i++)
     {
       if(sysState.keyPressed[i] != -1)
       {
@@ -388,11 +392,11 @@ int8_t compute_sine(uint32_t phase)
 // TODO: read systate and csurrentStepSize atomically
 void sampleISR()
 {
-  const int channels = 3;
-  static uint32_t phaseAcc[3] = {0, 0, 0}; // this declaration only happens once
+  // will be filled with 0s
+  static uint32_t phaseAcc[CHANNELS] = {0}; // this declaration only happens once
   int32_t Vout = 0; // declaration happens everytime
   
-  for(int i = 0; i < 3; i++)
+  for(int i = 0; i < CHANNELS; i++)
   {
     phaseAcc[i] += currentStepSize[i];
 
