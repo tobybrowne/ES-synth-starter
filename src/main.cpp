@@ -47,7 +47,7 @@
   // how many keys can be pressed together
   const int CHANNELS = 4;
 
-  // CAN RX msg buffer
+  // CAN message buffers
   QueueHandle_t msgInQ;
   QueueHandle_t msgOutQ;
 
@@ -62,28 +62,26 @@
     SemaphoreHandle_t mutex; 
   } sysState;
 
+  // knob inits
   Knob volumeKnob = Knob(0, 8, 5);
   Knob octaveKnob = Knob(0, 8, 0);
   Knob waveKnob = Knob(0, 2, 0);
 
-  const char* waveTypes[3] = {"Saw", "Sine", "Square"};
-
-  // stores the current step size that should be played
+  // stores the current step sizes that should be played
   volatile uint32_t currentStepSize[CHANNELS];
 
-  // CAN OUT message
   // TODO: make these memory safe by moving into sysState (described in Lab2)
+  // stores the last sent/received CAN message
   uint8_t TX_Message[8] = {0};
   uint8_t RX_Message[8] = {0};
 
-  // generate step sizes for each key's note
-  // frequencies for octave 0
+  // frequencies for each key at octave 0
   const int keyFreqs[12] = {65, 69, 73, 78, 82, 87, 93, 98, 104, 110, 116, 123};
-  const char* keyNames [12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+  
+  // stores the step sizes corresponding with each key at octave 0
   uint32_t stepSizes[12];
 
-  // stores sine wave with 256 x-values with amplitude 127 to -127
-  // surely sine resolution above 256 makes no sense
+  // stores sine wave with SINE_RESOLUTION x-values with amplitude 127 to -127
   const int SINE_RESOLUTION_BITS = 8;
   const int SINE_RESOLUTION = 1 << SINE_RESOLUTION_BITS;  // 2^SINE_RESOLUTION_BITS
   int sineLookup[SINE_RESOLUTION];
@@ -94,7 +92,7 @@ U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 // define timer object
 HardwareTimer sampleTimer(TIM1);
 
-//Function to set outputs using key matrix
+// Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value) {
   digitalWrite(REN_PIN,LOW);
   digitalWrite(RA0_PIN, bitIdx & 0x01);
@@ -132,8 +130,8 @@ std::bitset<4> readCols()
   return return_set;
 }
 
-// task to decode CAN messages in the RX buffer
-void decodeTask(void * pvParameters)
+// task to decode CAN messages in the RX buffer and play corresponding notes
+void receiveCanTask(void * pvParameters)
 {
   while(1)
   {
@@ -171,11 +169,11 @@ void decodeTask(void * pvParameters)
           }
         } 
       }
-      
     #endif
   }
 }
 
+// runs whenever a CAN message is received
 void CAN_RX_ISR (void) {
 	uint8_t RX_Message_ISR[8];
 	uint32_t ID;
@@ -183,13 +181,14 @@ void CAN_RX_ISR (void) {
 	xQueueSendFromISR(msgInQ, RX_Message_ISR, NULL);
 }
 
-// task to check keys pressed every 50ms
+// task to check keys pressed runs every 50ms
 void scanKeysTask(void * pvParameters)
 {
   const TickType_t xFrequency = 20/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  int lastKeyPressed = -1;
-  int keyPressed_local[CHANNELS];
+
+  // stores latest key presses before being stored globally
+  int keyPressedNew[CHANNELS];
   
   while(1)
   {
@@ -199,13 +198,12 @@ void scanKeysTask(void * pvParameters)
     // take systate mutex
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
 
+    // TODO: why can't we just access the actual global?
     // ensures we only access the actual variable once per loop
+    uint32_t currentStepSize_Local[CHANNELS] = {0};
 
-    uint32_t currentStepSize_local[CHANNELS] = {0};
-    for(int i = 0; i < CHANNELS; i++)
-    {
-      keyPressed_local[i] = -1;
-    }
+    // init keyPressedNew to -1
+    for(int i = 0; i < CHANNELS; i++){ keyPressedNew[i] = -1; }
   
     // get all 32 inputs
     for(int i = 0; i < 8; i++ )
@@ -227,12 +225,12 @@ void scanKeysTask(void * pvParameters)
     {
       if(sysState.inputs[i] == 0) // if key pressed...
       {
-        // only three keys at a time
+        // only finite key presses at a time
         if(j < CHANNELS)
         {
           // each octave the frequencies are doubled
-          currentStepSize_local[j] = stepSizes[i] << octaveKnob.getValue();
-          keyPressed_local[j] = i;
+          currentStepSize_Local[j] = stepSizes[i] << octaveKnob.getValue();
+          keyPressedNew[j] = i;
           j++;
         }
         
@@ -240,15 +238,14 @@ void scanKeysTask(void * pvParameters)
     } 
 
     #ifdef SENDER
-      // check for releases
+
+      // check for key releases
       for(int i = 0; i < CHANNELS; i++)
       {
         bool found = false;
-        // sysState
         for(int j = 0; j < CHANNELS; j++)
         {
-          // keyPressed_local
-          if(sysState.keyPressed[i] == keyPressed_local[j])
+          if(sysState.keyPressed[i] == keyPressedNew[j])
           {
             found = true;
           }
@@ -256,11 +253,11 @@ void scanKeysTask(void * pvParameters)
 
         if(!found)
         {
+          // send a "release" CAN message
           TX_Message[0] = 'R';
           TX_Message[1] = octaveKnob.getValue();
           TX_Message[2] = sysState.keyPressed[i];
           xQueueSend( msgOutQ, TX_Message, portMAX_DELAY);
-          // CAN_TX(0x123, TX_Message);
         }
       }
 
@@ -268,11 +265,9 @@ void scanKeysTask(void * pvParameters)
       for(int i = 0; i < CHANNELS; i++)
       {
         bool found = false;
-        // keyPressed_local
         for(int j = 0; j < CHANNELS; j++)
         {
-          // sysState
-          if(sysState.keyPressed[j] == keyPressed_local[i])
+          if(sysState.keyPressed[j] == keyPressedNew[i])
           {
             found = true;
           }
@@ -280,45 +275,47 @@ void scanKeysTask(void * pvParameters)
 
         if(!found)
         {
+          // send a "press" CAN message
           TX_Message[0] = 'P';
           TX_Message[1] = octaveKnob.getValue();
-          TX_Message[2] = keyPressed_local[i];
+          TX_Message[2] = keyPressedNew[i];
           xQueueSend( msgOutQ, TX_Message, portMAX_DELAY);
-          // CAN_TX(0x123, TX_Message);
         }
       }
     #endif
       
-    // check knob rotation (knob 3)
+    // check knob rotation
     volumeKnob.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
     octaveKnob.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
     waveKnob.updateQuadInputs(sysState.inputs[16], sysState.inputs[17]);
 
-    // deffo a better way of doing this
+    // store key presses in sysState
     for(int i = 0; i < CHANNELS; i++)
     {
-      sysState.keyPressed[i] = keyPressed_local[i];
+      sysState.keyPressed[i] = keyPressedNew[i];
     }
 
     // release systate mutex
     xSemaphoreGive(sysState.mutex);
   
     // atomic write to currentStepSize global
-    // if this process is interrupted its not a big deal right?
+    // TODO: is this kosher at all?
     for(int i = 0; i < CHANNELS; i++)
     {
-      __atomic_store_n(&currentStepSize[i], currentStepSize_local[i], __ATOMIC_RELAXED);
+      __atomic_store_n(&currentStepSize[i], currentStepSize_Local[i], __ATOMIC_RELAXED);
     }
   } 
 }
-
-
 
 // task to update OLED display every 100ms
 void displayUpdateTask(void * pvParameters)
 {
   const TickType_t xFrequency = 100/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
+
+  // strings used for display
+  const char* keyNames [12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+  const char* waveTypes[3] = {"Saw", "Sine", "Square"};
 
   while(1)
   {
@@ -328,13 +325,12 @@ void displayUpdateTask(void * pvParameters)
     // take systate mutex
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
 
-    //Update display
     u8g2.clearBuffer();         // clear the internal memory
     u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
     
+    // display notes pressed on current keyboard
     u8g2.setCursor(2,10);
-    u8g2.print("Keys: ");  // write something to the internal memory
-    
+    u8g2.print("Keys: "); 
     for(int i = 0; i < CHANNELS; i++)
     {
       if(sysState.keyPressed[i] != -1)
@@ -344,12 +340,16 @@ void displayUpdateTask(void * pvParameters)
       }
     }
 
+    // display octave of current keyboard
     u8g2.setCursor(2,20);
     u8g2.print("Oct: ");
     u8g2.print(octaveKnob.getValue());
+
+    // display wave type of current keyboard
     u8g2.print("   Wave: ");
     u8g2.print(waveTypes[waveKnob.getValue()]);
 
+    // display volume of curren keyboard
     u8g2.setCursor(2,30);
     u8g2.print("Vol: ");
     u8g2.print(volumeKnob.getValue());
@@ -360,9 +360,10 @@ void displayUpdateTask(void * pvParameters)
     u8g2.print(RX_Message[1]);
     u8g2.print(RX_Message[2]);
 
-    u8g2.sendBuffer();          // transfer internal memory to the display
+    // push screen buffer to display
+    u8g2.sendBuffer();
 
-    //Toggle LED
+    // toggle lED
     digitalToggle(LED_BUILTIN);
 
     // release systate mutex
@@ -370,14 +371,16 @@ void displayUpdateTask(void * pvParameters)
   } 
 }
 
-
-// ISR that runs 22,000 times per sec
-// TODO: read systate and csurrentStepSize atomically
+// sets speaker voltage 22,000 times per sec
+// TODO: read systate and currentStepSize atomically
 void sampleISR()
 {
-  // will be filled with 0s
-  static uint32_t phaseAcc[CHANNELS] = {0}; // this declaration only happens once
-  int32_t Vout = 0; // declaration happens everytime
+  // stores phase for each channel wave separately
+  static uint32_t phaseAcc[CHANNELS] = {0};
+
+  // stores current voltage of speaker
+  int32_t Vout = 0;
+  
   int waveType = waveKnob.getValue();
   
   for(int i = 0; i < CHANNELS; i++)
@@ -392,7 +395,7 @@ void sampleISR()
     // sine wave
     else if(waveType == 1)
     {
-      int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF;  // Shift phase and mask to get a value between 0 and 255
+      int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
       Vout += sineLookup[angle];
     }
     // square wave
@@ -405,12 +408,14 @@ void sampleISR()
 
   // log-taper volume control
   Vout = Vout >> (8 - volumeKnob.getValue());
+
+  // send volatage from 0-255 to speaker
   Vout = constrain(Vout + 128, 0, 255);   
   analogWrite(OUTR_PIN, Vout);
 }
 
 // scan TX mailbox and wait until a mailbox is available
-void canSendTask (void * pvParameters) {
+void sendCanTask (void * pvParameters) {
 	uint8_t msgOut[8];
 	while (1) {
 		xQueueReceive(msgOutQ, msgOut, portMAX_DELAY);
@@ -425,8 +430,6 @@ void CAN_TX_ISR (void) {
 }
 
 void setup() {
-  // put your setup code here, to run once:
-
   // compute step sizes from key frequencies
   for (int i = 0; i < 12; ++i) {
     stepSizes[i] = (uint32_t)(4294967296.0 * keyFreqs[i] / 22000.0);
@@ -438,9 +441,8 @@ void setup() {
   // init CAN mailbox semaphore
   CAN_TX_Semaphore = xSemaphoreCreateCounting(3,3);
 
-  // init CAN RX buffer (36 8 byte messages)
+  // init CAN RX/TX buffers (36 8 byte messages)
   msgInQ = xQueueCreate(36,8);
-  // init CAN TX buffer (36 8 byte messages)
   msgOutQ = xQueueCreate(36,8);
 
   // start key scanning thread
@@ -466,25 +468,25 @@ void setup() {
   // TODO: check if this stasck size is too much
   // TODO: check task priority
   // start decode CAN message thread
-  TaskHandle_t decode = NULL;
+  TaskHandle_t receiveCan = NULL;
   xTaskCreate(
-  decodeTask,		/* Function that implements the task */
-  "decode",		/* Text name for the task */
+  receiveCanTask,		/* Function that implements the task */
+  "receiveCan",		/* Text name for the task */
   256,      		/* Stack size in words, not bytes */
   NULL,			/* Parameter passed into the task */
   3,			/* Task priority */
-  &decode );	/* Pointer to store the task handle */
+  &receiveCan );	/* Pointer to store the task handle */
 
-  TaskHandle_t canSend = NULL;
+  TaskHandle_t sendCan = NULL;
   xTaskCreate(
-  canSendTask,		/* Function that implements the task */
-  "canSend",		/* Text name for the task */
+  sendCanTask,		/* Function that implements the task */
+  "sendCan",		/* Text name for the task */
   256,      		/* Stack size in words, not bytes */
   NULL,			/* Parameter passed into the task */
   3,			/* Task priority */
-  &canSend );	/* Pointer to store the task handle */
+  &sendCan );	/* Pointer to store the task handle */
   
-  // compute 256 sine values
+  // compute sine values for lookup table
   uint32_t phase = 0;
   while(phase < SINE_RESOLUTION)
   {
