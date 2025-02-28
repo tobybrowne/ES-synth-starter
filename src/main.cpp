@@ -9,8 +9,7 @@
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
 // THE ISR MAY INTERRUPT A PROCESS AT ANY POINTS, ALWAYS REMEMBER
 
-// #include <ES_CAN.h>
-
+#include <ES_CAN.h>
 
 //Constants
   const uint32_t interval = 100; //Display update interval
@@ -73,7 +72,6 @@
   const char* keyNames [12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
   uint32_t stepSizes[12];
 
-
   // stores sine wave with 256 x-values with amplitude 127 to -127
   // surely sine resolution above 256 makes no sense
   const int SINE_RESOLUTION_BITS = 8;
@@ -130,6 +128,7 @@ void scanKeysTask(void * pvParameters)
   const TickType_t xFrequency = 20/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
   int lastKeyPressed = -1;
+  int keyPressed_local[CHANNELS];
   
   while(1)
   {
@@ -144,7 +143,7 @@ void scanKeysTask(void * pvParameters)
     uint32_t currentStepSize_local[CHANNELS] = {0};
     for(int i = 0; i < CHANNELS; i++)
     {
-      sysState.keyPressed[i] = -1;
+      keyPressed_local[i] = -1;
     }
   
     // get all 32 inputs
@@ -172,43 +171,69 @@ void scanKeysTask(void * pvParameters)
         {
           // each octave the frequencies are doubled
           currentStepSize_local[j] = stepSizes[i] << octaveKnob.getValue();
-          // currentStepSize_local = stepSizes[i];
-          sysState.keyPressed[j] = i;
+          keyPressed_local[j] = i;
           j++;
         }
         
       }
     } 
 
-    // // check if key changed
-    // if(keyPressed != lastKeyPressed)
-    // {
-    //   // key release to nothing
-    //   if(keyPressed == -1)
-    //   {
-    //     TX_Message[0] = 'R';
-    //     TX_Message[1] = octaveKnob.getValue();
-    //     TX_Message[2] = lastKeyPressed;
-    //   }
-    //   // new key pressed
-    //   else
-    //   {
-    //     TX_Message[0] = 'P';
-    //     TX_Message[1] = octaveKnob.getValue();
-    //     TX_Message[2] = keyPressed;
-    //   }
+    // check for releases
+    for(int i = 0; i < CHANNELS; i++)
+    {
+      bool found = false;
+      // sysState
+      for(int j = 0; j < CHANNELS; j++)
+      {
+        // keyPressed_local
+        if(sysState.keyPressed[i] == keyPressed_local[j])
+        {
+          found = true;
+        }
+      }
 
-    //   // send message down CAN bus
-    //   //CAN_TX(0x123, TX_Message);
-    // }
+      if(!found)
+      {
+        TX_Message[0] = 'R';
+        TX_Message[1] = octaveKnob.getValue();
+        TX_Message[2] = sysState.keyPressed[i];
+        CAN_TX(0x123, TX_Message);
+      }
+    }
 
-   // lastKeyPressed = keyPressed;
-    //sysState.keyPressed = keyPressed;
+    // check for new presses
+    for(int i = 0; i < CHANNELS; i++)
+    {
+      bool found = false;
+      // keyPressed_local
+      for(int j = 0; j < CHANNELS; j++)
+      {
+        // sysState
+        if(sysState.keyPressed[j] == keyPressed_local[i])
+        {
+          found = true;
+        }
+      }
+
+      if(!found)
+      {
+        TX_Message[0] = 'P';
+        TX_Message[1] = octaveKnob.getValue();
+        TX_Message[2] = keyPressed_local[i];
+        CAN_TX(0x123, TX_Message);
+      }
+    }
       
     // check knob rotation (knob 3)
     volumeKnob.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
     octaveKnob.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
     waveKnob.updateQuadInputs(sysState.inputs[16], sysState.inputs[17]);
+
+    // deffo a better way of doing this
+    for(int i = 0; i < CHANNELS; i++)
+    {
+      sysState.keyPressed[i] = keyPressed_local[i];
+    }
 
     // release systate mutex
     xSemaphoreGive(sysState.mutex);
@@ -241,7 +266,7 @@ void displayUpdateTask(void * pvParameters)
     u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
     
     u8g2.setCursor(2,10);
-    u8g2.print("Key Pressed: ");  // write something to the internal memory
+    u8g2.print("Keys: ");  // write something to the internal memory
     
     for(int i = 0; i < CHANNELS; i++)
     {
@@ -253,25 +278,25 @@ void displayUpdateTask(void * pvParameters)
     }
 
     u8g2.setCursor(2,20);
-    u8g2.print("Octave: ");
+    u8g2.print("Oct: ");
     u8g2.print(octaveKnob.getValue());
-    u8g2.print("  Wave: ");
+    u8g2.print("   Wave: ");
     u8g2.print(waveTypes[waveKnob.getValue()]);
 
     u8g2.setCursor(2,30);
-    u8g2.print("Volume: ");
+    u8g2.print("Vol: ");
     u8g2.print(volumeKnob.getValue());
 
     // scan for CAN input
-    // uint32_t ID;
-    // uint8_t RX_Message[8] = {0};
-    // while (CAN_CheckRXLevel())
-    //   CAN_RX(ID, RX_Message);
+    uint32_t ID;
+    uint8_t RX_Message[8] = {0};
+    while (CAN_CheckRXLevel())
+      CAN_RX(ID, RX_Message);
 
-    // u8g2.setCursor(66,30);
-    // u8g2.print((char) RX_Message[0]);
-    // u8g2.print(RX_Message[1]);
-    // u8g2.print(RX_Message[2]);
+    u8g2.setCursor(66,30);
+    u8g2.print((char) RX_Message[0]);
+    u8g2.print(RX_Message[1]);
+    u8g2.print(RX_Message[2]);
 
     u8g2.sendBuffer();          // transfer internal memory to the display
 
@@ -396,9 +421,9 @@ void setup() {
   sampleTimer.resume();
 
   // init CAN bus
-  // CAN_Init(true); // true means it reads it's OWN CAN output
-  // setCANFilter(0x123,0x7ff);
-  // CAN_Start();
+  CAN_Init(true); // true means it reads it's OWN CAN output
+  setCANFilter(0x123,0x7ff);
+  CAN_Start();
 
   // start RTOS scheduler
   vTaskStartScheduler();
