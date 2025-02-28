@@ -133,7 +133,7 @@ class Knob
   struct
   {
     std::bitset<32> inputs; 
-    int keyPressed = -1;
+    int keyPressed[3] = {-1, -1, -1};
     SemaphoreHandle_t mutex; 
   } sysState;
 
@@ -144,7 +144,7 @@ class Knob
   const char* waveTypes[2] = {"Sawtooth", "Sine"};
 
   // stores the current step size that should be played
-  volatile uint32_t currentStepSize;
+  volatile uint32_t currentStepSize[3];
 
   // CAN OUT message
   // TODO: make this just a local inside scankeys (stop displaying on screen)
@@ -158,9 +158,9 @@ class Knob
 
   // stores sine wave with 256 x-values with amplitude 127 to -127
   // surely sine resolution above 256 makes no sense
-  const int SINE_RESOLUTION = 256;
+  const int SINE_RESOLUTION_BITS = 8;
+  const int SINE_RESOLUTION = 1 << SINE_RESOLUTION_BITS;  // 2^SINE_RESOLUTION_BITS
   int sineLookup[SINE_RESOLUTION];
-
 
 //Display driver objects
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
@@ -222,9 +222,9 @@ void scanKeysTask(void * pvParameters)
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
 
     // ensures we only access the actual variable once per loop
-    uint32_t currentStepSize_local = 0;
+    uint32_t currentStepSize_local[3] = {0, 0, 0};
 
-    int keyPressed = -1;
+    // int keyPressed = -1;
   
     // get all 32 inputs
     for(int i = 0; i < 8; i++ )
@@ -240,42 +240,54 @@ void scanKeysTask(void * pvParameters)
       }  
     }
 
+    // clear previous key presses
+    sysState.keyPressed[0] = -1;
+    sysState.keyPressed[1] = -1;
+    sysState.keyPressed[2] = -1;
+
     // check keyboard presses
+    int j = 0;
     for(int i = 0; i < 12; i++)
     {
-      if(sysState.inputs[i] == 0)
+      if(sysState.inputs[i] == 0) // if key pressed...
       {
-        // each octave the frequencies are doubled
-        currentStepSize_local = stepSizes[i] << octaveKnob.getValue();
-        // currentStepSize_local = stepSizes[i];
-        keyPressed = i;
+        // only three keys at a time
+        if(j < 3)
+        {
+          // each octave the frequencies are doubled
+          currentStepSize_local[j] = stepSizes[i] << octaveKnob.getValue();
+          // currentStepSize_local = stepSizes[i];
+          sysState.keyPressed[j] = i;
+          j++;
+        }
+        
       }
     } 
 
-    // check if key changed
-    if(keyPressed != lastKeyPressed)
-    {
-      // key release to nothing
-      if(keyPressed == -1)
-      {
-        TX_Message[0] = 'R';
-        TX_Message[1] = octaveKnob.getValue();
-        TX_Message[2] = lastKeyPressed;
-      }
-      // new key pressed
-      else
-      {
-        TX_Message[0] = 'P';
-        TX_Message[1] = octaveKnob.getValue();
-        TX_Message[2] = keyPressed;
-      }
+    // // check if key changed
+    // if(keyPressed != lastKeyPressed)
+    // {
+    //   // key release to nothing
+    //   if(keyPressed == -1)
+    //   {
+    //     TX_Message[0] = 'R';
+    //     TX_Message[1] = octaveKnob.getValue();
+    //     TX_Message[2] = lastKeyPressed;
+    //   }
+    //   // new key pressed
+    //   else
+    //   {
+    //     TX_Message[0] = 'P';
+    //     TX_Message[1] = octaveKnob.getValue();
+    //     TX_Message[2] = keyPressed;
+    //   }
 
-      // send message down CAN bus
-      //CAN_TX(0x123, TX_Message);
-    }
+    //   // send message down CAN bus
+    //   //CAN_TX(0x123, TX_Message);
+    // }
 
-    lastKeyPressed = keyPressed;
-    sysState.keyPressed = keyPressed;
+   // lastKeyPressed = keyPressed;
+    //sysState.keyPressed = keyPressed;
       
     // check knob rotation (knob 3)
     volumeKnob.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
@@ -286,7 +298,10 @@ void scanKeysTask(void * pvParameters)
     xSemaphoreGive(sysState.mutex);
   
     // atomic write to currentStepSize global
-    __atomic_store_n(&currentStepSize, currentStepSize_local, __ATOMIC_RELAXED);
+    // if this process is interrupted its not a big deal right?
+    __atomic_store_n(&currentStepSize[0], currentStepSize_local[0], __ATOMIC_RELAXED);
+    __atomic_store_n(&currentStepSize[1], currentStepSize_local[1], __ATOMIC_RELAXED);
+    __atomic_store_n(&currentStepSize[2], currentStepSize_local[2], __ATOMIC_RELAXED);
   } 
 }
 
@@ -310,12 +325,15 @@ void displayUpdateTask(void * pvParameters)
     
     u8g2.setCursor(2,10);
     u8g2.print("Key Pressed: ");  // write something to the internal memory
-    if(sysState.keyPressed != -1)
-    {
-      u8g2.print(keyNames[sysState.keyPressed]);
-    }
-
     
+    for(int i = 0; i < 3; i++)
+    {
+      if(sysState.keyPressed[i] != -1)
+      {
+        u8g2.print(keyNames[sysState.keyPressed[i]]);
+        u8g2.print(" ");
+      }
+    }
 
     u8g2.setCursor(2,20);
     u8g2.print("Octave: ");
@@ -351,16 +369,18 @@ void displayUpdateTask(void * pvParameters)
 int8_t compute_sine(uint32_t phase)
 {
   // converts value from 0->2^32 to 0->SIN_RESOLUTION for use with the lookup table
-  // int angle = (phase * SINE_RESOLUTION) >> 32;
+  // 
+  //int angle = (phase * SINE_RESOLUTION) >> 32;
   // int angle = (phase >> 24) & 0xFF;
   // Serial.println(phase);
-  int angle = std::round(static_cast<double>(phase) * SINE_RESOLUTION / 4294967295.0);
+  //int angle = std::round(static_cast<double>(phase) * SINE_RESOLUTION / 4294967295.0);
   // Serial.println(angle);
+  // int angle = (phase * SINE_RESOLUTION) >> 32;
+  
+  // hard programmed for 256 sine lookup table
+  int angle = (phase >> (32 - SINE_RESOLUTION_BITS)) & 0xFF;  // Shift phase and mask to get a value between 0 and 255
 
-  // Compute sine value and scale to the range [-127, 127]
-  int8_t sine_value = sineLookup[angle];
-
-  return sine_value;
+  return sineLookup[angle];
 }
 
 
@@ -368,28 +388,31 @@ int8_t compute_sine(uint32_t phase)
 // TODO: read systate and csurrentStepSize atomically
 void sampleISR()
 {
-  // phaseAcc is increased and then overflows many times a second (a wave)
-  static uint32_t phaseAcc = 0;
-  phaseAcc += currentStepSize;
-
-  // voltage from -127 to 127
-  int32_t Vout; // later we add 128 to stop -ve voltages
-
-  // sine wave
-  if(waveKnob.getValue())
+  const int channels = 3;
+  static uint32_t phaseAcc[3] = {0, 0, 0}; // this declaration only happens once
+  int32_t Vout = 0; // declaration happens everytime
+  
+  for(int i = 0; i < 3; i++)
   {
-    Vout = compute_sine(phaseAcc);
-  }
-  // sawtooth wave
-  else
-  {
-    Vout = (phaseAcc >> 24) - 128;
+    phaseAcc[i] += currentStepSize[i];
+
+    // sine wave
+    if(waveKnob.getValue())
+    {
+      Vout += compute_sine(phaseAcc[i]);
+      // Vout += (phaseAcc[i] >> 24) - 128;
+    }
+    // sawtooth wave
+    else
+    {
+      Vout += (phaseAcc[i] >> 24) - 128;
+    }
   }
 
   // log-taper volume control
   Vout = Vout >> (8 - volumeKnob.getValue());
-
-  analogWrite(OUTR_PIN, Vout + 128);
+  Vout = constrain(Vout + 128, 0, 255);   
+  analogWrite(OUTR_PIN, Vout);
 }
 
 void setup() {
