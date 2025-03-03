@@ -1,4 +1,4 @@
-// #define SENDER
+//#define SENDER
 
 #include <Arduino.h>
 #include <U8g2lib.h>
@@ -10,6 +10,13 @@
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
 // THE ISR MAY INTERRUPT A PROCESS AT ANY POINTS, ALWAYS REMEMBER
+
+// ISRs INTERRUPTS ALL RTOS TASKS
+
+// currentStepSize can be read by the sampling ISR at any point so it must always be in a valid state
+
+// We use atomic stores, in case the variable being written to is read in an ISR, which may be called mid-way through the writing process.
+// An atomic load is used when a variable is being read from which may be being written to at the same time (we don't have this case in our code)
 
 #include <ES_CAN.h>
 
@@ -45,7 +52,7 @@
   const int HKOE_BIT = 6;
 
   // how many keys can be pressed together
-  const int CHANNELS = 4;
+  const int CHANNELS = 3;
 
   // CAN message buffers
   QueueHandle_t msgInQ;
@@ -69,6 +76,8 @@
 
   // stores the current step sizes that should be played
   volatile uint32_t currentStepSize[CHANNELS];
+  // stores the current step sizes that should be played FROM OTHER BOARDS
+  volatile uint32_t currentStepSize_EXT[CHANNELS] = {0};
 
   // TODO: make these memory safe by moving into sysState (described in Lab2)
   // stores the last sent/received CAN message
@@ -131,6 +140,7 @@ std::bitset<4> readCols()
 }
 
 // task to decode CAN messages in the RX buffer and play corresponding notes
+
 void receiveCanTask(void * pvParameters)
 {
   while(1)
@@ -141,19 +151,20 @@ void receiveCanTask(void * pvParameters)
 
     #ifndef SENDER
       uint8_t action = RX_Message[0];
-      uint8_t octave = RX_Message[0];
-      uint8_t key = RX_Message[0];
+      uint8_t octave = RX_Message[1];
+      uint8_t key = RX_Message[2];
       uint32_t stepSize = stepSizes[key] << octave;
-      
+
       // key press
       if(RX_Message[0] == 'P')
       {
         for(int i = 0; i < CHANNELS; i++)
         {
           // can only play if we have available channels
-          if(currentStepSize[i] == 0)
+          if(currentStepSize_EXT[i] == 0)
           {
-            currentStepSize[i] = stepSize;
+            __atomic_store_n(&currentStepSize_EXT[i], stepSize, __ATOMIC_RELAXED);
+            break;
           }
         } 
       }
@@ -163,9 +174,10 @@ void receiveCanTask(void * pvParameters)
       {
         for(int i = 0; i < CHANNELS; i++)
         {
-          if(currentStepSize[i] == stepSize)
+          if(currentStepSize_EXT[i] == stepSize)
           {
-            currentStepSize[i] = 0;
+            __atomic_store_n(&currentStepSize_EXT[i], 0, __ATOMIC_RELAXED);
+            break;
           }
         } 
       }
@@ -257,7 +269,7 @@ void scanKeysTask(void * pvParameters)
           TX_Message[0] = 'R';
           TX_Message[1] = octaveKnob.getValue();
           TX_Message[2] = sysState.keyPressed[i];
-          xQueueSend( msgOutQ, TX_Message, portMAX_DELAY);
+          xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
         }
       }
 
@@ -279,7 +291,7 @@ void scanKeysTask(void * pvParameters)
           TX_Message[0] = 'P';
           TX_Message[1] = octaveKnob.getValue();
           TX_Message[2] = keyPressedNew[i];
-          xQueueSend( msgOutQ, TX_Message, portMAX_DELAY);
+          xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
         }
       }
     #endif
@@ -299,7 +311,7 @@ void scanKeysTask(void * pvParameters)
     xSemaphoreGive(sysState.mutex);
   
     // atomic write to currentStepSize global
-    // TODO: is this kosher at all?
+    // if the ISR only receives half of the updated values thats fine, but we can't have half-written elements
     for(int i = 0; i < CHANNELS; i++)
     {
       __atomic_store_n(&currentStepSize[i], currentStepSize_Local[i], __ATOMIC_RELAXED);
@@ -330,15 +342,28 @@ void displayUpdateTask(void * pvParameters)
     
     // display notes pressed on current keyboard
     u8g2.setCursor(2,10);
-    u8g2.print("Keys: "); 
-    for(int i = 0; i < CHANNELS; i++)
-    {
-      if(sysState.keyPressed[i] != -1)
-      {
+    u8g2.print("Keys: ");
+
+    // Print the keys that are pressed
+    for (int i = 0; i < CHANNELS; i++) {
+      if (sysState.keyPressed[i] != -1) {
         u8g2.print(keyNames[sysState.keyPressed[i]]);
         u8g2.print(" ");
       }
     }
+
+    // Determine the width of the display
+    int displayWidth = u8g2.getDisplayWidth();
+    int textWidth = u8g2.getStrWidth("RECV"); // RECV and SEND have same width
+    u8g2.setCursor(displayWidth - textWidth, 10);
+
+    // Conditionally print "SEND" or "RECV"
+    #ifdef SENDER
+      u8g2.print("SEND");
+    #endif
+    #ifndef SENDER
+      u8g2.print("RECV");
+    #endif
 
     // display octave of current keyboard
     u8g2.setCursor(2,20);
@@ -376,17 +401,24 @@ void displayUpdateTask(void * pvParameters)
 void sampleISR()
 {
   // stores phase for each channel wave separately
-  static uint32_t phaseAcc[CHANNELS] = {0};
+  static uint32_t phaseAcc[CHANNELS*2] = {0};
 
   // stores current voltage of speaker
   int32_t Vout = 0;
   
   int waveType = waveKnob.getValue();
   
-  for(int i = 0; i < CHANNELS; i++)
+  for(int i = 0; i < CHANNELS*2; i++)
   {
-    phaseAcc[i] += currentStepSize[i];
-
+    if(i < CHANNELS)
+    {
+      phaseAcc[i] += currentStepSize[i];
+    }
+    else
+    {
+      phaseAcc[i] += currentStepSize_EXT[i - CHANNELS];
+    }
+    
     // sawtooth wave
     if(waveType == 0)
     {
@@ -531,7 +563,7 @@ void setup() {
   #endif
 
   // init CAN bus
-  CAN_Init(true); // true means it reads it's OWN CAN output
+  CAN_Init(false); // true means it reads it's OWN CAN output
   setCANFilter(0x123,0x7ff);
 
   // bind ISR to CAN RX event
