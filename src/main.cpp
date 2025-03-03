@@ -74,6 +74,9 @@
   Knob octaveKnob = Knob(0, 8, 0);
   Knob waveKnob = Knob(0, 2, 0);
 
+  // signed value from -1
+  volatile int joystick = 0;
+
   // stores the current step sizes that should be played
   volatile uint32_t currentStepSize[CHANNELS];
   // stores the current step sizes that should be played FROM OTHER BOARDS
@@ -216,6 +219,28 @@ void scanKeysTask(void * pvParameters)
 
     // init keyPressedNew to -1
     for(int i = 0; i < CHANNELS; i++){ keyPressedNew[i] = -1; }
+
+    // TODO: make this atomic cos joystick is read in ISR
+    // top is 130 bottom is 890
+    int max = 777;
+    int min = 177;
+    int joystick_temp = analogRead(JOYY_PIN);
+    if(joystick_temp > max)
+    {
+      joystick_temp = max;
+    }
+    else if(joystick_temp < min)
+    {
+      joystick_temp = min;
+    }
+    // scale from -100 to 100
+    joystick_temp = (-joystick_temp + 477) / 3;
+    if(joystick_temp < 5 && joystick_temp > -5)
+    {
+      joystick_temp = 0;
+    }
+
+    __atomic_store_n(&joystick, joystick_temp, __ATOMIC_RELAXED);
   
     // get all 32 inputs
     for(int i = 0; i < 8; i++ )
@@ -241,7 +266,7 @@ void scanKeysTask(void * pvParameters)
         if(j < CHANNELS)
         {
           // each octave the frequencies are doubled
-          currentStepSize_Local[j] = stepSizes[i] << octaveKnob.getValue();
+          currentStepSize_Local[j] = (stepSizes[i] << octaveKnob.getValue()) * (1 + static_cast<float>(joystick)/150);
           keyPressedNew[j] = i;
           j++;
         }
