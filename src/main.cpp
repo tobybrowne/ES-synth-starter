@@ -1,5 +1,3 @@
-//#define SENDER
-
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <bitset>
@@ -19,6 +17,8 @@
 // An atomic load is used when a variable is being read from which may be being written to at the same time (we don't have this case in our code)
 
 #include <ES_CAN.h>
+
+  bool sender = false;
 
 //Constants
   const uint32_t interval = 100; //Display update interval
@@ -152,7 +152,8 @@ void receiveCanTask(void * pvParameters)
     // yields the CPU to other tasks in the meantime
     xQueueReceive(msgInQ, RX_Message, portMAX_DELAY);
 
-    #ifndef SENDER
+    if(!sender)
+    {
       uint8_t action = RX_Message[0];
       uint8_t octave = RX_Message[1];
       uint8_t key = RX_Message[2];
@@ -184,7 +185,7 @@ void receiveCanTask(void * pvParameters)
           }
         } 
       }
-    #endif
+    }
   }
 }
 
@@ -270,12 +271,34 @@ void scanKeysTask(void * pvParameters)
           keyPressedNew[j] = i;
           j++;
         }
-        
       }
     } 
 
-    #ifdef SENDER
+    // check CAN inputs for keyboards on left and right
+    bool westDetect = !sysState.inputs[23];
+    bool eastDetect = !sysState.inputs[27];
 
+    // leftmost board
+    if(eastDetect && !westDetect)
+    {
+      sender = false;
+      octaveKnob.setValue(0);
+    }
+    // middle board
+    else if(eastDetect && westDetect)
+    {
+      sender = true;
+      octaveKnob.setValue(1);
+    }
+    // leftmost board
+    else if(!eastDetect && westDetect)
+    {
+      sender = true;
+      octaveKnob.setValue(2);
+    }
+
+    if(sender)
+    {
       // check for key releases
       for(int i = 0; i < CHANNELS; i++)
       {
@@ -319,8 +342,8 @@ void scanKeysTask(void * pvParameters)
           xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
         }
       }
-    #endif
-      
+    }
+
     // check knob rotation
     volumeKnob.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
     octaveKnob.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
@@ -383,12 +406,14 @@ void displayUpdateTask(void * pvParameters)
     u8g2.setCursor(displayWidth - textWidth, 10);
 
     // Conditionally print "SEND" or "RECV"
-    #ifdef SENDER
+    if(sender)
+    {
       u8g2.print("SEND");
-    #endif
-    #ifndef SENDER
+    }
+    else
+    {
       u8g2.print("RECV");
-    #endif
+    }
 
     // display octave of current keyboard
     u8g2.setCursor(2,20);
@@ -580,12 +605,13 @@ void setup() {
   Serial.println("Hello World");
 
   // only receivers should play their notes
-  #ifndef SENDER
+  if(!sender)
+  {
     // initialise sampling interrupt (22,000 times a sec)
     sampleTimer.setOverflow(22000, HERTZ_FORMAT);
     sampleTimer.attachInterrupt(sampleISR);
     sampleTimer.resume();
-  #endif
+  }
 
   // init CAN bus
   CAN_Init(false); // true means it reads it's OWN CAN output
