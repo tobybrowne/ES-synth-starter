@@ -14,6 +14,9 @@ class Knob
         // get knob value
         int getValue();
 
+        // set knob value
+        int setValue(int _value);
+
     private:
         int max;
         int min;
