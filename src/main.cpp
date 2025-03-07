@@ -4,6 +4,8 @@
 #include <STM32FreeRTOS.h>
 #include <math.h>
 #include <knob.h>
+#include <cstring>
+
 
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
@@ -19,6 +21,17 @@
 #include <ES_CAN.h>
 
   bool sender = false;
+  bool handshakePending = false;
+
+  bool westDetect;
+  bool eastDetect;
+
+  int BOARD_ID;
+  int ID_RECV = -1;
+
+  int outBits[7] = {0, 0, 0, 1, 1, 1, 1};
+  int outBits_new[7] = {0, 0, 0, 0, 0, 0, 0};
+  // last two are west and east (they've both been turned on)
 
 //Constants
   const uint32_t interval = 100; //Display update interval
@@ -98,6 +111,8 @@
   const int SINE_RESOLUTION = 1 << SINE_RESOLUTION_BITS;  // 2^SINE_RESOLUTION_BITS
   int sineLookup[SINE_RESOLUTION];
 
+  bool octaveOverride = false;
+
 //Display driver objects
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 
@@ -146,15 +161,42 @@ std::bitset<4> readCols()
 
 void receiveCanTask(void * pvParameters)
 {
+  int octaveCurrent;
   while(1)
   {
     // blocks until data is available
     // yields the CPU to other tasks in the meantime
     xQueueReceive(msgInQ, RX_Message, portMAX_DELAY);
 
+    uint8_t action = RX_Message[0];
+    
+    // TODO: bring this back later
+    // octave change
+    // if(RX_Message[0] == 'O')
+    // {
+    //   octaveOverride = true;
+    //   int8_t octave = (int8_t)RX_Message[1]; // needs to be signed
+    //   Serial.println(octave);
+    //   octaveCurrent = octaveKnob.getValue();
+    //   octaveKnob.setValue(octaveCurrent + (int)octave);
+    // }
+
+    // receive ID during handshake
+    if(RX_Message[0] == 'I')
+    {
+      if(handshakePending)
+      {
+         ID_RECV = RX_Message[1];
+      }
+    }
+    else if(RX_Message[0] == 'E')
+    {
+      // turn east back on
+      outBits[6] = 1; 
+    }
+
     if(!sender)
     {
-      uint8_t action = RX_Message[0];
       uint8_t octave = RX_Message[1];
       uint8_t key = RX_Message[2];
       uint32_t stepSize = stepSizes[key] << octave;
@@ -197,6 +239,15 @@ void CAN_RX_ISR (void) {
 	xQueueSendFromISR(msgInQ, RX_Message_ISR, NULL);
 }
 
+// called to send an ID to another board for handshaking
+void sendID(int boardID)
+{
+  // send a "release" CAN message
+  TX_Message[0] = 'I';
+  TX_Message[1] = boardID;
+  xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
+}
+
 // task to check keys pressed runs every 50ms
 void scanKeysTask(void * pvParameters)
 {
@@ -205,6 +256,15 @@ void scanKeysTask(void * pvParameters)
 
   // stores latest key presses before being stored globally
   int keyPressedNew[CHANNELS];
+
+  // stores last state of east/west
+  // forces a check on startup
+  int lastWest = -1;
+  int lastEast = -1;
+
+  int octave = 0;
+  int lastOctave = 0;
+
   
   while(1)
   {
@@ -217,6 +277,8 @@ void scanKeysTask(void * pvParameters)
     // TODO: why can't we just access the actual global?
     // ensures we only access the actual variable once per loop
     uint32_t currentStepSize_Local[CHANNELS] = {0};
+
+    bool westGoesHigh ;
 
     // init keyPressedNew to -1
     for(int i = 0; i < CHANNELS; i++){ keyPressedNew[i] = -1; }
@@ -247,6 +309,8 @@ void scanKeysTask(void * pvParameters)
     for(int i = 0; i < 8; i++ )
     {
       setRow(i);
+      digitalWrite(OUT_PIN, outBits[i]);
+      
       delayMicroseconds(3);
       std::bitset<4> columns = readCols();
   
@@ -273,30 +337,112 @@ void scanKeysTask(void * pvParameters)
         }
       }
     } 
+    
+    // TODO: bring this back later
+    // if(octaveOverride == false)
+    // {
+    //   octave = octaveKnob.getValue();
+    //   if(octave != lastOctave)
+    //   {
+    //     // send a +N octave message
+    //     TX_Message[0] = 'O';
+    //     TX_Message[1] = octave - lastOctave;
+    //     xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
+    //     lastOctave = octave;
+    //   }
+    // }
+    // else
+    // {
+    //   octaveOverride = false;
+    // }
+    
 
     // check CAN inputs for keyboards on left and right
-    bool westDetect = !sysState.inputs[23];
-    bool eastDetect = !sysState.inputs[27];
+    westDetect = !sysState.inputs[23];
+    eastDetect = !sysState.inputs[27];
 
-    // leftmost board
-    if(eastDetect && !westDetect)
-    {
-      sender = false;
-      octaveKnob.setValue(0);
-    }
-    // middle board
-    else if(eastDetect && westDetect)
-    {
-      sender = true;
-      octaveKnob.setValue(1);
-    }
-    // leftmost board
-    else if(!eastDetect && westDetect)
-    {
-      sender = true;
-      octaveKnob.setValue(2);
-    }
+    Serial.println(BOARD_ID);
 
+    int handshakeDelayStart;
+    
+    // if handshake inputs change
+    if (lastWest != westDetect || lastEast != eastDetect)
+    {
+      // west went from low to high
+      if(lastWest == 0 && westDetect == 1)
+      {
+        westGoesHigh = true;
+      }
+      else
+      {
+        westGoesHigh = false;
+      }
+
+      Serial.println("START HANDSHAKE!");
+
+      // left most board
+      if (!westDetect)
+      {
+        // wait long enough to recv messages
+        handshakePending = true;
+
+        ID_RECV = -1;
+
+
+        xSemaphoreGive(sysState.mutex);
+        // YIELD TO ANOTHER TASK
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        // COME BACK WHEN THERES BEEN AN ID MESSAGE
+
+        // take systate mutex
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+
+        handshakePending = false;  // Reset flag
+        
+        // NO board id received...
+        if (ID_RECV == -1)
+        {
+          if(westGoesHigh) // this is just the boards turning on their east after handshake
+          {
+            continue;
+          }
+          Serial.println("NO BOARD ID RECEIVED!");
+          BOARD_ID = 0;
+          sender = false;
+        }
+        else
+        {
+          BOARD_ID = ID_RECV;
+          sender = true;
+        }
+        
+        octaveKnob.setValue(BOARD_ID);
+
+       
+        if(eastDetect)
+        {
+
+          // turn east off
+          outBits[6] = 0;
+          setOutMuxBit(HKOE_BIT, LOW);
+
+          delay(500);
+          sendID(BOARD_ID+1);
+        }
+        else // if you have an easternly board
+        {
+          // send a "end handshake" CAN message
+          TX_Message[0] = 'E';
+          xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
+        }
+      }
+
+      lastWest = westDetect;
+      lastEast = eastDetect;
+    } 
+
+ 
+    
     if(sender)
     {
       // check for key releases
@@ -402,18 +548,9 @@ void displayUpdateTask(void * pvParameters)
 
     // Determine the width of the display
     int displayWidth = u8g2.getDisplayWidth();
-    int textWidth = u8g2.getStrWidth("RECV"); // RECV and SEND have same width
+    int textWidth = u8g2.getStrWidth("00"); // RECV and SEND have same width
     u8g2.setCursor(displayWidth - textWidth, 10);
-
-    // Conditionally print "SEND" or "RECV"
-    if(sender)
-    {
-      u8g2.print("SEND");
-    }
-    else
-    {
-      u8g2.print("RECV");
-    }
+    u8g2.print(BOARD_ID);
 
     // display octave of current keyboard
     u8g2.setCursor(2,20);
@@ -430,10 +567,22 @@ void displayUpdateTask(void * pvParameters)
     u8g2.print(volumeKnob.getValue());
 
     // display last received CAN message
-    u8g2.setCursor(66,30);
+    u8g2.setCursor(63,30);
     u8g2.print((char) RX_Message[0]);
     u8g2.print(RX_Message[1]);
     u8g2.print(RX_Message[2]);
+
+    if(handshakePending)
+    {
+      textWidth = u8g2.getStrWidth("HAND");
+      u8g2.setCursor(displayWidth - textWidth, 10);
+      u8g2.print("HAND");
+    }
+
+    textWidth = u8g2.getStrWidth("HAND");
+    u8g2.setCursor(displayWidth - textWidth, 30);
+    u8g2.print(westDetect);
+    u8g2.print(eastDetect);
 
     // push screen buffer to display
     u8g2.sendBuffer();
@@ -450,6 +599,10 @@ void displayUpdateTask(void * pvParameters)
 // TODO: read systate and currentStepSize atomically
 void sampleISR()
 {
+  // TODO: make the ISR not be attached to a sender
+  // sender doesn't play notes
+  if(sender) return;
+
   // stores phase for each channel wave separately
   static uint32_t phaseAcc[CHANNELS*2] = {0};
 
@@ -527,6 +680,12 @@ void setup() {
   msgInQ = xQueueCreate(36,8);
   msgOutQ = xQueueCreate(36,8);
 
+  // init keyPressed to all -1
+  for(int i = 0; i < CHANNELS; i++)
+  {
+    sysState.keyPressed[i] = -1;
+  }
+
   // start key scanning thread
   TaskHandle_t scanKeysHandle = NULL;
   xTaskCreate(
@@ -600,18 +759,23 @@ void setup() {
   u8g2.begin();
   setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
 
+  setOutMuxBit(HKOW_BIT, HIGH);
+  delayMicroseconds(2);
+  setOutMuxBit(HKOE_BIT, HIGH);
+
+  // allows east/west signals to stabilise before they are read (IMPORTANT)
+  delay(1000);
+  
+
   //Initialise UART
   Serial.begin(9600);
   Serial.println("Hello World");
 
-  // only receivers should play their notes
-  if(!sender)
-  {
-    // initialise sampling interrupt (22,000 times a sec)
-    sampleTimer.setOverflow(22000, HERTZ_FORMAT);
-    sampleTimer.attachInterrupt(sampleISR);
-    sampleTimer.resume();
-  }
+  // initialise sampling interrupt (22,000 times a sec)
+  sampleTimer.setOverflow(22000, HERTZ_FORMAT);
+  sampleTimer.attachInterrupt(sampleISR);
+  sampleTimer.resume();
+
 
   // init CAN bus
   CAN_Init(false); // true means it reads it's OWN CAN output
@@ -627,6 +791,7 @@ void setup() {
 
   // start RTOS scheduler
   vTaskStartScheduler();
+
 }
 
 void loop() 

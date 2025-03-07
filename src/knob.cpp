@@ -78,8 +78,10 @@ int Knob::getValue()
 // set knob value
 int Knob::setValue(int _value)
 {
-  if(_value < max && _value > min)
-  {
-    __atomic_store_n(&value, _value, __ATOMIC_RELAXED);
-  }
+  value = _value;
+  valueNext = value;
+  // if(_value < max && _value > min)
+  // {
+  //   __atomic_store_n(&value, _value, __ATOMIC_RELAXED);
+  // }
 }
