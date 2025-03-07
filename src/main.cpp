@@ -480,6 +480,7 @@ void scanKeysTask(void * pvParameters)
         {
           // send a "release" CAN message
           sendKeyPress('R', octaveKnob.getValue(), sysState.keyPressed[i]);
+          sendKeyPress('R', octaveKnob.getValue(), sysState.keyPressed[i]);
         }
       }
 
@@ -571,7 +572,9 @@ void displayUpdateTask(void * pvParameters)
     u8g2.print(octaveKnob.getValue());
 
     // display wave type of current keyboard
-    u8g2.print("   Wave: ");
+    textWidth = u8g2.getStrWidth("Wave: ") + u8g2.getStrWidth(waveTypes[waveKnob.getValue()]);
+    u8g2.setCursor(displayWidth - textWidth, 20);
+    u8g2.print("Wave: ");
     u8g2.print(waveTypes[waveKnob.getValue()]);
 
     // display volume of curren keyboard
