@@ -172,14 +172,13 @@ void receiveCanTask(void * pvParameters)
     
     // TODO: bring this back later
     // octave change
-    // if(RX_Message[0] == 'O')
-    // {
-    //   octaveOverride = true;
-    //   int8_t octave = (int8_t)RX_Message[1]; // needs to be signed
-    //   Serial.println(octave);
-    //   octaveCurrent = octaveKnob.getValue();
-    //   octaveKnob.setValue(octaveCurrent + (int)octave);
-    // }
+    if(RX_Message[0] == 'O')
+    {
+      octaveOverride = true; // prevents these changes also being broadcasted on CAN
+      int8_t octave = (int8_t)RX_Message[1]; // needs to be signed
+      octaveCurrent = octaveKnob.getValue();
+      octaveKnob.setValue(octaveCurrent + (int)octave);
+    }
 
     // receive ID during handshake
     if(RX_Message[0] == 'I')
@@ -263,7 +262,7 @@ void scanKeysTask(void * pvParameters)
   int lastEast = -1;
 
   int octave = 0;
-  int lastOctave = 0;
+  int lastOctave = -1;
 
   
   while(1)
@@ -337,6 +336,24 @@ void scanKeysTask(void * pvParameters)
         }
       }
     } 
+
+    octave = octaveKnob.getValue();
+    if((octave != lastOctave) && lastOctave != -1)
+    {
+      if(octaveOverride)
+      {
+        octaveOverride = false; // reset flag
+        lastOctave = octave;
+      }
+      else
+      {
+        // send a +N octave message
+        TX_Message[0] = 'O';
+        TX_Message[1] = octave - lastOctave;
+        xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
+        lastOctave = octave;
+      }
+    }
     
     // TODO: bring this back later
     // if(octaveOverride == false)
@@ -433,6 +450,7 @@ void scanKeysTask(void * pvParameters)
       }
       
       octaveKnob.setValue(BOARD_ID);
+      lastOctave = BOARD_ID;
 
       // turn east off
       outBits[6] = 0;
