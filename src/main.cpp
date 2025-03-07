@@ -355,7 +355,6 @@ void scanKeysTask(void * pvParameters)
     // {
     //   octaveOverride = false;
     // }
-    
 
     // check CAN inputs for keyboards on left and right
     westDetect = !sysState.inputs[23];
@@ -403,6 +402,8 @@ void scanKeysTask(void * pvParameters)
     }
 
     // west HIGH to LOW
+    // keyboard on left unplugged
+    // OR keyboard on left finished handshake
     // OR startup of the leftmost board
     // this assumes we dont plug a keyboard in when the rest are in handshake mode (cos west would then be low)
     else if((lastWest == 1 && westDetect == 0) || (lastWest == -1 && westDetect == 0))
@@ -423,15 +424,12 @@ void scanKeysTask(void * pvParameters)
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);
       handshakePending = false;
       
+      BOARD_ID = ID_RECV;
+      sender = true;
       if(ID_RECV == -1) // this is the left-most board
       {
         BOARD_ID = 0;
         sender = false;
-      }
-      else
-      {
-        BOARD_ID = ID_RECV;
-        sender = true;
       }
       
       octaveKnob.setValue(BOARD_ID);
