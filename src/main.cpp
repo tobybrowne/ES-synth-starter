@@ -91,7 +91,7 @@
   volatile int joystick = 0;
 
   // stores the current step sizes that should be played
-  volatile uint32_t currentStepSize[CHANNELS];
+  volatile uint32_t currentStepSize[2*CHANNELS];
   // stores the current step sizes that should be played FROM OTHER BOARDS
   volatile uint32_t currentStepSize_EXT[CHANNELS] = {0};
 
@@ -298,7 +298,7 @@ void scanKeysTask(void * pvParameters)
 
     // TODO: why can't we just access the actual global?
     // ensures we only access the actual variable once per loop
-    uint32_t currentStepSize_Local[CHANNELS] = {0};
+    uint32_t currentStepSize_Local[2*CHANNELS] = {0};
 
     // init keyPressedNew to -1
     for(int i = 0; i < CHANNELS; i++){ keyPressedNew[i] = -1; }
@@ -341,6 +341,12 @@ void scanKeysTask(void * pvParameters)
         }
       }
     } 
+
+    // add external key presses to currentStepSize
+    for(int i = 0; i < CHANNELS; i++)
+    {
+      currentStepSize_Local[i + CHANNELS] = (currentStepSize_EXT[i]) * (1 + static_cast<float>(joystick)/150);
+    }
 
     octave = octaveKnob.getValue();
     if((octave != lastOctave) && lastOctave != -1)
@@ -513,7 +519,7 @@ void scanKeysTask(void * pvParameters)
   
     // atomic write to currentStepSize global
     // if the ISR only receives half of the updated values thats fine, but we can't have half-written elements
-    for(int i = 0; i < CHANNELS; i++)
+    for(int i = 0; i < 2*CHANNELS; i++)
     {
       __atomic_store_n(&currentStepSize[i], currentStepSize_Local[i], __ATOMIC_RELAXED);
     }
@@ -620,14 +626,7 @@ void sampleISR()
   
   for(int i = 0; i < CHANNELS*2; i++)
   {
-    if(i < CHANNELS)
-    {
-      phaseAcc[i] += currentStepSize[i];
-    }
-    else
-    {
-      phaseAcc[i] += currentStepSize_EXT[i - CHANNELS];
-    }
+    phaseAcc[i] += currentStepSize[i];
     
     // sawtooth wave
     if(waveType == 0)
