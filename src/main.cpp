@@ -361,88 +361,101 @@ void scanKeysTask(void * pvParameters)
     westDetect = !sysState.inputs[23];
     eastDetect = !sysState.inputs[27];
 
-    Serial.println(BOARD_ID);
-
-    int handshakeDelayStart;
-    
-    // if handshake inputs change
-    if (lastWest != westDetect || lastEast != eastDetect)
+    // east LOW to HIGH
+    if(lastEast == 0 && eastDetect == 1)
     {
-      // west went from low to high
-      if(lastWest == 0 && westDetect == 1)
+      // keyboard plugged into right
+      if(BOARD_ID != -1)
       {
-        westGoesHigh = true;
+        // turn east off
+        outBits[6] = 0;
+        setOutMuxBit(HKOE_BIT, LOW);
+
+        // I DONT KNOW WHY I NEED THIS BUT IT BREAKS OTHERWISE :/
+        handshakePending = true;
+        ID_RECV = -1;
+        xSemaphoreGive(sysState.mutex);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        handshakePending = false;
+
+        // send the board it's id
+        delay(500);
+        sendID(BOARD_ID+1);
+      }
+    }
+    // east HIGH to LOW
+    else if(lastEast == 1 && eastDetect == 0)
+    { 
+      // keyboard on right removed
+      // DO NOTHING
+    }
+    // west LOW to HIGH
+    if(lastWest == 0 && westDetect == 1)
+    {
+      // keyboard is plugged into left
+      // DO NOTHING HANDSHAKE HASNT STARTED
+
+      // OR
+
+      // signals being reset after after handshake
+      // DO NOTHING
+    }
+
+    // west HIGH to LOW
+    // OR startup of the leftmost board
+    // this assumes we dont plug a keyboard in when the rest are in handshake mode (cos west would then be low)
+    else if((lastWest == 1 && westDetect == 0) || (lastWest == -1 && westDetect == 0))
+    {
+      // keyboard on left unplugged
+      // START HANDSHAKE
+
+      // OR
+
+      // keyboard on left finished handshake
+      // START HANDSHAKE
+
+      // yield task so that CAN messages can be received
+      handshakePending = true;
+      ID_RECV = -1;
+      xSemaphoreGive(sysState.mutex);
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+      handshakePending = false;
+      
+      if(ID_RECV == -1) // this is the left-most board
+      {
+        BOARD_ID = 0;
+        sender = false;
       }
       else
       {
-        westGoesHigh = false;
+        BOARD_ID = ID_RECV;
+        sender = true;
       }
+      
+      octaveKnob.setValue(BOARD_ID);
 
-      Serial.println("START HANDSHAKE!");
+      // turn east off
+      outBits[6] = 0;
+      setOutMuxBit(HKOE_BIT, LOW);
 
-      // left most board
-      if (!westDetect)
+      // send board it's new ID
+      delay(500);
+      sendID(BOARD_ID+1);
+
+      // if you are the rightmost board then finish the handshaking sequence
+      if(!eastDetect)
       {
-        // wait long enough to recv messages
-        handshakePending = true;
-
-        ID_RECV = -1;
-
-
-        xSemaphoreGive(sysState.mutex);
-        // YIELD TO ANOTHER TASK
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        // COME BACK WHEN THERES BEEN AN ID MESSAGE
-
-        // take systate mutex
-        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-
-        handshakePending = false;  // Reset flag
-        
-        // NO board id received...
-        if (ID_RECV == -1)
-        {
-          if(westGoesHigh) // this is just the boards turning on their east after handshake
-          {
-            continue;
-          }
-          Serial.println("NO BOARD ID RECEIVED!");
-          BOARD_ID = 0;
-          sender = false;
-        }
-        else
-        {
-          BOARD_ID = ID_RECV;
-          sender = true;
-        }
-        
-        octaveKnob.setValue(BOARD_ID);
-
-       
-        if(eastDetect)
-        {
-
-          // turn east off
-          outBits[6] = 0;
-          setOutMuxBit(HKOE_BIT, LOW);
-
-          delay(500);
-          sendID(BOARD_ID+1);
-        }
-        else // if you have an easternly board
-        {
-          // send a "end handshake" CAN message
-          TX_Message[0] = 'E';
-          xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
-        }
+        // send a "end handshake" CAN message
+        TX_Message[0] = 'E';
+        xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
       }
+    }
 
-      lastWest = westDetect;
-      lastEast = eastDetect;
-    } 
+    lastWest = westDetect;
+    lastEast = eastDetect;
 
- 
-    
     if(sender)
     {
       // check for key releases
