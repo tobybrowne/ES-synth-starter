@@ -247,6 +247,29 @@ void sendID(int boardID)
   xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
 }
 
+
+void sendKeyPress(char action, int octave, int keyPressed)
+{
+  TX_Message[0] = action;
+  TX_Message[1] = octave;
+  TX_Message[2] = keyPressed;
+  xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
+}
+
+void sendEndHandshake()
+{
+  TX_Message[0] = 'E';
+  xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
+}
+
+// send a +N octave message
+void sendChangeOctave(int octaveChange)
+{
+  TX_Message[0] = 'O';
+  TX_Message[1] = octaveChange;
+  xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
+}
+
 // task to check keys pressed runs every 50ms
 void scanKeysTask(void * pvParameters)
 {
@@ -277,31 +300,13 @@ void scanKeysTask(void * pvParameters)
     // ensures we only access the actual variable once per loop
     uint32_t currentStepSize_Local[CHANNELS] = {0};
 
-    bool westGoesHigh ;
-
     // init keyPressedNew to -1
     for(int i = 0; i < CHANNELS; i++){ keyPressedNew[i] = -1; }
 
-    // TODO: make this atomic cos joystick is read in ISR
-    // top is 130 bottom is 890
-    int max = 777;
-    int min = 177;
-    int joystick_temp = analogRead(JOYY_PIN);
-    if(joystick_temp > max)
-    {
-      joystick_temp = max;
-    }
-    else if(joystick_temp < min)
-    {
-      joystick_temp = min;
-    }
-    // scale from -100 to 100
+    // top is 777 bottom is 177
+    int joystick_temp = constrain(analogRead(JOYY_PIN), 177, 777);
     joystick_temp = (-joystick_temp + 477) / 3;
-    if(joystick_temp < 5 && joystick_temp > -5)
-    {
-      joystick_temp = 0;
-    }
-
+    joystick_temp = (abs(joystick_temp) < 5) ? 0 : joystick_temp;
     __atomic_store_n(&joystick, joystick_temp, __ATOMIC_RELAXED);
   
     // get all 32 inputs
@@ -348,30 +353,10 @@ void scanKeysTask(void * pvParameters)
       else
       {
         // send a +N octave message
-        TX_Message[0] = 'O';
-        TX_Message[1] = octave - lastOctave;
-        xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
+        sendChangeOctave(octave - lastOctave);
         lastOctave = octave;
       }
     }
-    
-    // TODO: bring this back later
-    // if(octaveOverride == false)
-    // {
-    //   octave = octaveKnob.getValue();
-    //   if(octave != lastOctave)
-    //   {
-    //     // send a +N octave message
-    //     TX_Message[0] = 'O';
-    //     TX_Message[1] = octave - lastOctave;
-    //     xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
-    //     lastOctave = octave;
-    //   }
-    // }
-    // else
-    // {
-    //   octaveOverride = false;
-    // }
 
     // check CAN inputs for keyboards on left and right
     westDetect = !sysState.inputs[23];
@@ -464,8 +449,7 @@ void scanKeysTask(void * pvParameters)
       if(!eastDetect)
       {
         // send a "end handshake" CAN message
-        TX_Message[0] = 'E';
-        xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
+        sendEndHandshake();
       }
     }
 
@@ -489,10 +473,7 @@ void scanKeysTask(void * pvParameters)
         if(!found)
         {
           // send a "release" CAN message
-          TX_Message[0] = 'R';
-          TX_Message[1] = octaveKnob.getValue();
-          TX_Message[2] = sysState.keyPressed[i];
-          xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
+          sendKeyPress('R', octaveKnob.getValue(), sysState.keyPressed[i]);
         }
       }
 
@@ -511,10 +492,7 @@ void scanKeysTask(void * pvParameters)
         if(!found)
         {
           // send a "press" CAN message
-          TX_Message[0] = 'P';
-          TX_Message[1] = octaveKnob.getValue();
-          TX_Message[2] = keyPressedNew[i];
-          xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
+          sendKeyPress('P', octaveKnob.getValue(), keyPressedNew[i]);
         }
       }
     }
