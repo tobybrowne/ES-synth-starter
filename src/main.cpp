@@ -4,6 +4,7 @@
 #include <STM32FreeRTOS.h>
 #include <math.h>
 #include <knob.h>
+#include <drum.h>
 #include <cstring>
 #include <unordered_set>
 
@@ -73,7 +74,7 @@
   const int HKOE_BIT = 6;
 
   // how many keys can be pressed together
-  const int CHANNELS = 3;
+  const int CHANNELS = 12;
 
   // CAN message buffers
   QueueHandle_t msgInQ;
@@ -92,8 +93,9 @@
 
   // knob inits
   Knob volumeKnob = Knob(0, 8, 5);
-  Knob octaveKnob = Knob(0, 8, 0);
+  Knob octaveKnob = Knob(0, 8, 3);
   Knob waveKnob = Knob(0, 2, 0);
+  Knob InstrumentKnob = Knob(0,1,0);
 
   // TODO: what variables should be volatile?
   // stores the current step sizes that should be played
@@ -680,6 +682,7 @@ void scanKeysTask(void * pvParameters)
     // check knob rotation
     octaveKnob.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
     waveKnob.updateQuadInputs(sysState.inputs[16], sysState.inputs[17]);
+    InstrumentKnob.updateQuadInputs(sysState.inputs[18], sysState.inputs[19]); 
     if(!stereo) // no knob volume control in stereo mode
     {
       volumeKnob.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
@@ -737,6 +740,7 @@ void displayUpdateTask(void * pvParameters)
   // strings used for display
   const char* keyNames [12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
   const char* waveTypes[3] = {"Saw", "Sine", "Square"};
+  const char* instrumentTypes[2] = {"Drums", "Piano"};
 
   while(1)
   {
@@ -779,16 +783,23 @@ void displayUpdateTask(void * pvParameters)
     u8g2.print("Wave: ");
     u8g2.print(waveTypes[waveKnob.getValue()]);
 
+    textWidth = u8g2.getStrWidth("Instr: ") + u8g2.getStrWidth(instrumentTypes[InstrumentKnob.getValue()]);
+    u8g2.setCursor(displayWidth - textWidth, 30);
+    u8g2.print("Instr: ");
+    u8g2.print(instrumentTypes[InstrumentKnob.getValue()]);
+
+
+
     // display volume of curren keyboard
     u8g2.setCursor(2,30);
     u8g2.print("Vol: ");
     u8g2.print(volumeKnob.getValue());
 
     // display last received CAN message
-    u8g2.setCursor(63,30);
-    u8g2.print((char) RX_Message[0]);
-    u8g2.print(RX_Message[1]);
-    u8g2.print(RX_Message[2]);
+    // u8g2.setCursor(63,30);
+    // u8g2.print((char) RX_Message[0]);
+    // u8g2.print(RX_Message[1]);
+    // u8g2.print(RX_Message[2]);
 
     if(handshakePending)
     {
@@ -813,6 +824,64 @@ void displayUpdateTask(void * pvParameters)
   } 
 }
 
+// sets speaker voltage 22,000 times per sec
+// TODO: read systate and currentStepSize atomically
+void sampleISR()
+{
+    if (sender) return; // The sender doesn't play notes
+
+    static uint32_t phaseAcc[CHANNELS * 2] = {0};
+    int32_t Vout = 0;
+
+    int waveType = waveKnob.getValue();
+
+
+    // Check if we're in synth mode (0) or drum mode (1)
+    if (InstrumentKnob.getValue() == 0) // Play Synthesizer
+    {
+      drum(Vout);
+    }
+
+        
+        for (int i = 0; i < CHANNELS * 2; i++)
+        {
+            phaseAcc[i] += currentStepSize[i];
+            int32_t v_delta = 0;
+
+            // Generate waveform based on waveType
+            if (waveType == 0) // Sawtooth Wave
+            {
+                v_delta = (phaseAcc[i] >> 24) - 128;
+            }
+            else if (waveType == 1) // Sine Wave
+            {
+                int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
+                v_delta = sineLookup[angle];
+            }
+            else if (waveType == 2) // Square Wave
+            {
+                v_delta = (phaseAcc[i] > (1 << 31)) ? 127 : -128;
+            }
+
+            // Apply damper effect
+            float newValue = 1.0 - ((float)channelTimes[i] / DAMPER_RESOLUTION);
+            v_delta = (float)v_delta * newValue;
+
+            // If note is active, add to output
+            if (currentStepSize[i] != 0) 
+            {
+                Vout += v_delta;
+            }
+        }
+    
+
+    // Apply volume control using logarithmic tapering
+    Vout = Vout >> (8 - volumeKnob.getValue());
+
+    // Ensure Vout stays within 0-255 range for DAC
+    Vout = constrain(Vout + 128, 0, 255);
+    analogWrite(OUTR_PIN, Vout);
+}
 
 
 // scan TX mailbox and wait until a mailbox is available
