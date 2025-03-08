@@ -541,6 +541,8 @@ void scanKeysTask(void * pvParameters)
     // =========== double buffering ===============
     int nonActiveBuffer = 1 - __atomic_load_n(&activeBuffer, __ATOMIC_RELAXED); // 1-active buffer 
     xSemaphoreTake(bufferMutex, portMAX_DELAY); // lock active
+    memcpy((void *)stepSizeBuffer[nonActiveBuffer], (void *)currentStepSize_Local, sizeof(currentStepSize_Local));
+
     xSemaphoreGive(bufferMutex); // unlock 
 
     __atomic_store_n(&activeBuffer, nonActiveBuffer, __ATOMIC_RELEASE); // transfer data
@@ -571,7 +573,9 @@ void displayUpdateTask(void * pvParameters)
     
     // display notes pressed on current keyboard
     u8g2.setCursor(2,10);
-    // u8g2.print("Keys: ");
+    u8g2.print("Keys: ");
+    u8g2.print(activeBuffer);
+
 
     // Print the keys that are pressed
     for (int i = 0; i < CHANNELS; i++) {
@@ -651,9 +655,7 @@ void sampleISR()
   int bufferIndex = __atomic_load_n(&activeBuffer, __ATOMIC_RELAXED); 
   volatile uint32_t*  currentBuffer = stepSizeBuffer[bufferIndex];
 
-  u8g2.setCursor(2,10);
-  u8g2.print("index: ");
-  u8g2.println(bufferIndex);
+ 
 
   for(int i = 0; i < CHANNELS*2; i++){
       phaseAcc[i] += currentBuffer[i];
