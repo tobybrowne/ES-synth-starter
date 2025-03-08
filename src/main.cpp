@@ -27,6 +27,9 @@
   bool eastDetect;
 
   bool reverb = true;
+  bool stereo = false;
+
+  bool rightBoard = false;
 
   int BOARD_ID;
   int ID_RECV = -1;
@@ -176,7 +179,6 @@ void receiveCanTask(void * pvParameters)
 
     uint8_t action = RX_Message[0];
     
-    // TODO: bring this back later
     // octave change
     if(RX_Message[0] == 'O')
     {
@@ -184,6 +186,24 @@ void receiveCanTask(void * pvParameters)
       int8_t octave = (int8_t)RX_Message[1]; // needs to be signed
       octaveCurrent = octaveKnob.getValue();
       octaveKnob.setValue(octaveCurrent + (int)octave);
+    }
+
+    // set stereo balance
+    if(RX_Message[0] == 'B')
+    {
+      int stereoBalance = RX_Message[1];
+      int leftVolume = 8 - (stereoBalance / 2);
+      int rightVolume = stereoBalance / 2;
+
+      // only the right board will receive this but we provide for completeness...
+      if(BOARD_ID == 0) 
+      {
+        volumeKnob.setValue(leftVolume);
+      }
+      else if(rightBoard)
+      {
+        volumeKnob.setValue(rightVolume);
+      }
     }
 
     // receive ID during handshake
@@ -277,14 +297,35 @@ void sendChangeOctave(int octaveChange)
   xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
 }
 
+// takes in value from 0 (left) to 16 (right)
+void sendStereoBalance(int stereoBalance)
+{
+  // send CAN message
+  TX_Message[0] = 'B';
+  TX_Message[1] = stereoBalance;
+  xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
+}
+
 // reads the vertical joystick component [-100, 100]
 int readJoystickVert()
 {
   // top is 777 bottom is 177
   int joystick = constrain(analogRead(JOYY_PIN), 177, 777);
   joystick = (-joystick + 477) / 3;
-  return (abs(joystick) < 5) ? 0 : joystick;
+  return (abs(joystick) < 5) ? 0 : joystick; // apply deadzone
 }
+
+// reads the horizontal joystick component [-100, 100]
+int readJoystickHoriz()
+{
+    int joystick = constrain(analogRead(JOYX_PIN), 128, 929);
+    joystick = (-joystick + 528.5) / 4.005;
+    return (abs(joystick) < 5) ? 0 : joystick; // apply deadzone
+}
+
+
+
+
 
 // task to check keys pressed runs every 20ms
 void scanKeysTask(void * pvParameters)
@@ -303,7 +344,9 @@ void scanKeysTask(void * pvParameters)
   int octave = 0;
   int lastOctave = -1;
 
-  int joystick;
+  int joystick_vert;
+  int joystick_horiz;
+  int last_joystick_horiz = -1000; // forces an update on startup
 
   while(1)
   {
@@ -316,6 +359,29 @@ void scanKeysTask(void * pvParameters)
     // ensures we only access the actual variable once per loop
     uint32_t currentStepSize_Local[2*CHANNELS] = {0};
 
+    joystick_vert = readJoystickVert();
+    joystick_horiz = readJoystickHoriz();
+
+    if(joystick_horiz != last_joystick_horiz)
+    {
+      // sends message to right board 
+      if(BOARD_ID == 0 && stereo)
+      {
+        // Scale from [-100, 100] to [0, 16]
+        int stereoBalance = constrain(joystick_horiz, -100, 100);
+        
+        stereoBalance = map(stereoBalance, -100, 100, 0, 16);
+
+        // send message to right board
+        sendStereoBalance(stereoBalance);
+
+        int leftVolume = 8 - (stereoBalance / 2);
+
+        volumeKnob.setValue(leftVolume);
+      }
+      last_joystick_horiz = joystick_horiz;
+    }
+
     // increment all times in channelTimes
     int newValue;
     for(int i = 0; i < CHANNELS*2; i++)
@@ -327,9 +393,6 @@ void scanKeysTask(void * pvParameters)
 
     // init all internal channels to 0xFFFF
     for(int i = 0; i < CHANNELS; i++){ keyPressedLocal[i] = 0xFFFF;}
-
-    // read joystick value [-100, +100]
-    joystick = readJoystickVert();
   
     // read all 32 inputs into sysState.inputs and keyPressedLocal
     int ch = 0;
@@ -451,6 +514,8 @@ void scanKeysTask(void * pvParameters)
       {
         BOARD_ID = 0;
         sender = false;
+
+        rightBoard = false;
       }
       
       octaveKnob.setValue(BOARD_ID);
@@ -467,8 +532,19 @@ void scanKeysTask(void * pvParameters)
       // if you are the rightmost board then finish the handshaking sequence
       if(!eastDetect)
       {
+        if(BOARD_ID != 0)
+        {
+          rightBoard = true;
+        }
+        
         // send a "end handshake" CAN message
         sendEndHandshake();
+
+        // in stereo mode both left and right boards receive
+        if(stereo)
+        {
+          sender = false;
+        }
       }
     }
 
@@ -520,9 +596,12 @@ void scanKeysTask(void * pvParameters)
     }
 
     // check knob rotation
-    volumeKnob.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
     octaveKnob.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
     waveKnob.updateQuadInputs(sysState.inputs[16], sysState.inputs[17]);
+    if(!stereo) // no knob volume control in stereo mode
+    {
+      volumeKnob.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
+    }
 
     // store key presses in sysState and manage reverb
     for(int i = 0; i < 2*CHANNELS; i++)
@@ -551,7 +630,7 @@ void scanKeysTask(void * pvParameters)
       {
         uint8_t keyIndex = sysState.keyPressed[i] & 0xFF;
         uint8_t octave = (sysState.keyPressed[i] >> 8) & 0xFF;
-        currentStepSize_Local[i] = (stepSizes[keyIndex] << octave) * (1 + static_cast<float>(joystick)/150);
+        currentStepSize_Local[i] = (stepSizes[keyIndex] << octave) * (1 + static_cast<float>(joystick_vert)/150);
       }
     }
 
@@ -566,7 +645,6 @@ void scanKeysTask(void * pvParameters)
     }
   } 
 }
-
 
 
 // task to update OLED display every 100ms
