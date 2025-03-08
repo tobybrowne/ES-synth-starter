@@ -90,10 +90,16 @@
   // signed value from -1
   volatile int joystick = 0;
 
+  // TODO: what variables should be volatile?
+  // TODO: merge currentStepSize with EXT
   // stores the current step sizes that should be played
+  // first half stores internal key presses, second half stores external key presses
   volatile uint32_t currentStepSize[2*CHANNELS];
-  // stores the current step sizes that should be played FROM OTHER BOARDS
-  volatile uint32_t currentStepSize_EXT[CHANNELS] = {0};
+
+  // how long since the key was pressed
+  // stores an int from 0 -> DAMPER_RESOLUTION
+  float DAMPER_RESOLUTION = 64;
+  volatile int channelTimes[2*CHANNELS] = {0};
 
   // TODO: make these memory safe by moving into sysState (described in Lab2)
   // stores the last sent/received CAN message
@@ -203,12 +209,13 @@ void receiveCanTask(void * pvParameters)
       // key press
       if(RX_Message[0] == 'P')
       {
-        for(int i = 0; i < CHANNELS; i++)
+        for(int i = CHANNELS; i < 2*CHANNELS; i++)
         {
           // can only play if we have available channels
-          if(currentStepSize_EXT[i] == 0)
+          if(currentStepSize[i] == 0)
           {
-            __atomic_store_n(&currentStepSize_EXT[i], stepSize, __ATOMIC_RELAXED);
+            __atomic_store_n(&channelTimes[CHANNELS + i], 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&currentStepSize[i], stepSize, __ATOMIC_RELAXED);
             break;
           }
         } 
@@ -217,11 +224,11 @@ void receiveCanTask(void * pvParameters)
       // key release
       if(RX_Message[0] == 'R')
       {
-        for(int i = 0; i < CHANNELS; i++)
+        for(int i = CHANNELS; i < 2*CHANNELS; i++)
         {
-          if(currentStepSize_EXT[i] == stepSize)
+          if(currentStepSize[i] == stepSize)
           {
-            __atomic_store_n(&currentStepSize_EXT[i], 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&currentStepSize[i], 0, __ATOMIC_RELAXED);
             break;
           }
         } 
@@ -270,7 +277,7 @@ void sendChangeOctave(int octaveChange)
   xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
 }
 
-// task to check keys pressed runs every 50ms
+// task to check keys pressed runs every 20ms
 void scanKeysTask(void * pvParameters)
 {
   const TickType_t xFrequency = 20/portTICK_PERIOD_MS;
@@ -287,7 +294,6 @@ void scanKeysTask(void * pvParameters)
   int octave = 0;
   int lastOctave = -1;
 
-  
   while(1)
   {
     // ensures we sample keyboard only every 50ms
@@ -298,7 +304,20 @@ void scanKeysTask(void * pvParameters)
 
     // TODO: why can't we just access the actual global?
     // ensures we only access the actual variable once per loop
+
     uint32_t currentStepSize_Local[2*CHANNELS] = {0};
+    int newValue;
+
+    // increment all times in channelTimes
+    for(int i = 0; i < CHANNELS*2; i++)
+    {
+      newValue = channelTimes[i] + 1;
+      if(newValue > DAMPER_RESOLUTION)
+      {
+        newValue = DAMPER_RESOLUTION;
+      }
+      __atomic_store_n(&channelTimes[i], newValue, __ATOMIC_RELAXED);
+    }
 
     // init keyPressedNew to -1
     for(int i = 0; i < CHANNELS; i++){ keyPressedNew[i] = -1; }
@@ -343,9 +362,9 @@ void scanKeysTask(void * pvParameters)
     } 
 
     // add external key presses to currentStepSize
-    for(int i = 0; i < CHANNELS; i++)
+    for(int i = CHANNELS; i < 2*CHANNELS; i++)
     {
-      currentStepSize_Local[i + CHANNELS] = (currentStepSize_EXT[i]) * (1 + static_cast<float>(joystick)/150);
+      currentStepSize_Local[i + CHANNELS] = (currentStepSize[i]) * (1 + static_cast<float>(joystick)/150);
     }
 
     octave = octaveKnob.getValue();
@@ -462,45 +481,55 @@ void scanKeysTask(void * pvParameters)
     lastWest = westDetect;
     lastEast = eastDetect;
 
-    if(sender)
+    // check for key releases
+    for(int i = 0; i < CHANNELS; i++)
     {
-      // check for key releases
-      for(int i = 0; i < CHANNELS; i++)
+      bool found = false;
+      for(int j = 0; j < CHANNELS; j++)
       {
-        bool found = false;
-        for(int j = 0; j < CHANNELS; j++)
+        if(sysState.keyPressed[i] == keyPressedNew[j])
         {
-          if(sysState.keyPressed[i] == keyPressedNew[j])
-          {
-            found = true;
-          }
+          found = true;
         }
+      }
 
-        if(!found)
+      if(!found)
+      {
+        // send a "release" CAN message
+        if(sender)
         {
-          // send a "release" CAN message
           sendKeyPress('R', octaveKnob.getValue(), sysState.keyPressed[i]);
           sendKeyPress('R', octaveKnob.getValue(), sysState.keyPressed[i]);
         }
       }
+    }
 
-      // check for new presses
-      for(int i = 0; i < CHANNELS; i++)
+    // check for new presses
+    for(int i = 0; i < CHANNELS; i++)
+    {
+      bool found = false;
+      for(int j = 0; j < CHANNELS; j++)
       {
-        bool found = false;
-        for(int j = 0; j < CHANNELS; j++)
+        if(sysState.keyPressed[j] == keyPressedNew[i])
         {
-          if(sysState.keyPressed[j] == keyPressedNew[i])
-          {
-            found = true;
-          }
+          found = true;
         }
+      }
 
-        if(!found)
+      if(!found)
+      {
+        // send a "press" CAN message
+        // IF YOU SEND TWO CAN MESSAGES IN THE SAME TASK DOES ONE GET LOST
+        // DOES THE CAN TASK RUN WHILST THIS TASK IS RUNNING?
+        if(sender)
         {
-          // send a "press" CAN message
           sendKeyPress('P', octaveKnob.getValue(), keyPressedNew[i]);
         }
+        
+        // TODO: make atomic
+        // set time since pressed to 0
+        
+        __atomic_store_n(&channelTimes[i], 0, __ATOMIC_RELAXED);
       }
     }
 
@@ -626,27 +655,37 @@ void sampleISR()
   int32_t Vout = 0;
   
   int waveType = waveKnob.getValue();
-  
+  // 
   for(int i = 0; i < CHANNELS*2; i++)
   {
     phaseAcc[i] += currentStepSize[i];
-    
+    int32_t v_delta = 0;
     // sawtooth wave
     if(waveType == 0)
     {
-      Vout += (phaseAcc[i] >> 24) - 128;
+      v_delta = (phaseAcc[i] >> 24) - 128;
     }
     // sine wave
     else if(waveType == 1)
     {
       int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
-      Vout += sineLookup[angle];
+      v_delta = sineLookup[angle];
     }
     // square wave
     else if(waveType == 2)
     {
       int threshold = (phaseAcc[i] > (1 << 31));
-      Vout += (threshold * 256) - 128;
+      v_delta = (threshold * 256) - 128;
+    }
+
+    // Serial.println();
+    float newValue = 1.0 - ((float)channelTimes[i]/DAMPER_RESOLUTION);
+    // float newValue = 0.5;
+    v_delta = (float)v_delta * newValue;
+    // v_delta = v_delta >> 1;
+    if(currentStepSize[i] != 0) // need this idk why
+    {
+      Vout += v_delta;
     }
   }
 
@@ -700,7 +739,7 @@ void setup() {
   xTaskCreate(
   scanKeysTask,		/* Function that implements the task */
   "scanKeys",		/* Text name for the task */
-  64,      		/* Stack size in words, not bytes */
+  256,      		/* Stack size in words, not bytes */
   NULL,			/* Parameter passed into the task */
   2,			/* Task priority */
   &scanKeysHandle );	/* Pointer to store the task handle */
@@ -784,7 +823,6 @@ void setup() {
   sampleTimer.setOverflow(22000, HERTZ_FORMAT);
   sampleTimer.attachInterrupt(sampleISR);
   sampleTimer.resume();
-
 
   // init CAN bus
   CAN_Init(false); // true means it reads it's OWN CAN output
