@@ -6,7 +6,6 @@
 #include <knob.h>
 #include <cstring>
 
-
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
 // THE ISR MAY INTERRUPT A PROCESS AT ANY POINTS, ALWAYS REMEMBER
@@ -17,6 +16,8 @@
 
 // We use atomic stores, in case the variable being written to is read in an ISR, which may be called mid-way through the writing process.
 // An atomic load is used when a variable is being read from which may be being written to at the same time (we don't have this case in our code)
+
+// TODO: whammy bar will break everything, because step sizes will change which means releasing keys wont work
 
 #include <ES_CAN.h>
 
@@ -77,8 +78,8 @@
   // store inputs state
   struct
   {
-    std::bitset<32> inputs; 
-    int keyPressed[CHANNELS];
+    std::bitset<32> inputs;
+    uint16_t keyPressed[CHANNELS*2]; // stores octave-index pairs for all keys pressed 
     SemaphoreHandle_t mutex; 
   } sysState;
 
@@ -87,13 +88,11 @@
   Knob octaveKnob = Knob(0, 8, 0);
   Knob waveKnob = Knob(0, 2, 0);
 
-  // signed value from -1
-  volatile int joystick = 0;
-
   // TODO: what variables should be volatile?
   // TODO: merge currentStepSize with EXT
   // stores the current step sizes that should be played
   // first half stores internal key presses, second half stores external key presses
+  // SHOULD JUST BE USED TO TRANSFER FREQS BETWEEN SCANKEYS AND SAMPLEISR
   volatile uint32_t currentStepSize[2*CHANNELS];
 
   // how long since the key was pressed
@@ -212,10 +211,10 @@ void receiveCanTask(void * pvParameters)
         for(int i = CHANNELS; i < 2*CHANNELS; i++)
         {
           // can only play if we have available channels
-          if(currentStepSize[i] == 0)
+          if(sysState.keyPressed[i] == 0xFFFF)
           {
             __atomic_store_n(&channelTimes[CHANNELS + i], 0, __ATOMIC_RELAXED);
-            __atomic_store_n(&currentStepSize[i], stepSize, __ATOMIC_RELAXED);
+            sysState.keyPressed[i] = (octave << 8) | key;
             break;
           }
         } 
@@ -226,9 +225,9 @@ void receiveCanTask(void * pvParameters)
       {
         for(int i = CHANNELS; i < 2*CHANNELS; i++)
         {
-          if(currentStepSize[i] == stepSize)
+          if(sysState.keyPressed[i] == (octave << 8) | key)
           {
-            __atomic_store_n(&currentStepSize[i], 0, __ATOMIC_RELAXED);
+            sysState.keyPressed[i] = 0xFFFF;
             break;
           }
         } 
@@ -284,7 +283,7 @@ void scanKeysTask(void * pvParameters)
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   // stores latest key presses before being stored globally
-  int keyPressedNew[CHANNELS];
+  uint16_t keyPressedLocal[CHANNELS*2];
 
   // stores last state of east/west
   // forces a check on startup
@@ -312,21 +311,17 @@ void scanKeysTask(void * pvParameters)
     for(int i = 0; i < CHANNELS*2; i++)
     {
       newValue = channelTimes[i] + 1;
-      if(newValue > DAMPER_RESOLUTION)
-      {
-        newValue = DAMPER_RESOLUTION;
-      }
+      if(newValue > DAMPER_RESOLUTION){ newValue = DAMPER_RESOLUTION; }
       __atomic_store_n(&channelTimes[i], newValue, __ATOMIC_RELAXED);
     }
 
-    // init keyPressedNew to -1
-    for(int i = 0; i < CHANNELS; i++){ keyPressedNew[i] = -1; }
+    // init all internal channels to 0xFFFF
+    for(int i = 0; i < CHANNELS; i++){ keyPressedLocal[i] = 0xFFFF;}
 
     // top is 777 bottom is 177
-    int joystick_temp = constrain(analogRead(JOYY_PIN), 177, 777);
-    joystick_temp = (-joystick_temp + 477) / 3;
-    joystick_temp = (abs(joystick_temp) < 5) ? 0 : joystick_temp;
-    __atomic_store_n(&joystick, joystick_temp, __ATOMIC_RELAXED);
+    int joystick = constrain(analogRead(JOYY_PIN), 177, 777);
+    joystick = (-joystick + 477) / 3;
+    joystick = (abs(joystick) < 5) ? 0 : joystick;
   
     // get all 32 inputs
     for(int i = 0; i < 8; i++ )
@@ -353,18 +348,18 @@ void scanKeysTask(void * pvParameters)
         // only finite key presses at a time
         if(j < CHANNELS)
         {
-          // each octave the frequencies are doubled
-          currentStepSize_Local[j] = (stepSizes[i] << octaveKnob.getValue()) * (1 + static_cast<float>(joystick)/150);
-          keyPressedNew[j] = i;
+          keyPressedLocal[j] = (octave << 8) | i;
           j++;
         }
       }
     } 
 
-    // add external key presses to currentStepSize
-    for(int i = CHANNELS; i < 2*CHANNELS; i++)
+    // convert key presses to step sizes (both internal and external)
+    for(int i = 0; i < 2*CHANNELS; i++)
     {
-      currentStepSize_Local[i + CHANNELS] = (currentStepSize[i]) * (1 + static_cast<float>(joystick)/150);
+      uint8_t keyIndex = keyPressedLocal[i] & 0xFF;
+      uint8_t octave = (keyPressedLocal[i] >> 8) & 0xFF;
+      currentStepSize_Local[i] = (stepSizes[keyIndex] << octave) * (1 + static_cast<float>(joystick)/150);
     }
 
     octave = octaveKnob.getValue();
@@ -485,9 +480,11 @@ void scanKeysTask(void * pvParameters)
     for(int i = 0; i < CHANNELS; i++)
     {
       bool found = false;
+      uint8_t keyIndex = sysState.keyPressed[i] & 0xFF;
+      uint8_t octave = (sysState.keyPressed[i] >> 8) & 0xFF;
       for(int j = 0; j < CHANNELS; j++)
       {
-        if(sysState.keyPressed[i] == keyPressedNew[j])
+        if(keyIndex == (keyPressedLocal[j] & 0xFF))
         {
           found = true;
         }
@@ -498,9 +495,10 @@ void scanKeysTask(void * pvParameters)
         // send a "release" CAN message
         if(sender)
         {
-          sendKeyPress('R', octaveKnob.getValue(), sysState.keyPressed[i]);
-          sendKeyPress('R', octaveKnob.getValue(), sysState.keyPressed[i]);
+          sendKeyPress('R', octave, keyIndex);
+          sendKeyPress('R', octave, keyIndex);
         }
+        sendKeyPress('R', octave, keyIndex);
       }
     }
 
@@ -508,9 +506,13 @@ void scanKeysTask(void * pvParameters)
     for(int i = 0; i < CHANNELS; i++)
     {
       bool found = false;
+
       for(int j = 0; j < CHANNELS; j++)
       {
-        if(sysState.keyPressed[j] == keyPressedNew[i])
+        uint8_t keyIndex = sysState.keyPressed[j] & 0xFF;
+        uint8_t octave = (sysState.keyPressed[j] >> 8) & 0xFF;
+        // dont compare octaves incase the keyboard octave is changed
+        if(keyIndex == (keyPressedLocal[i] & 0xFF))
         {
           found = true;
         }
@@ -523,12 +525,12 @@ void scanKeysTask(void * pvParameters)
         // DOES THE CAN TASK RUN WHILST THIS TASK IS RUNNING?
         if(sender)
         {
-          sendKeyPress('P', octaveKnob.getValue(), keyPressedNew[i]);
+          sendKeyPress('P', (keyPressedLocal[i] >> 8) & 0xFF, keyPressedLocal[i] & 0xFF);
         }
+        sendKeyPress('P', (keyPressedLocal[i] >> 8) & 0xFF, keyPressedLocal[i] & 0xFF);
         
         // TODO: make atomic
         // set time since pressed to 0
-        
         __atomic_store_n(&channelTimes[i], 0, __ATOMIC_RELAXED);
       }
     }
@@ -538,10 +540,11 @@ void scanKeysTask(void * pvParameters)
     octaveKnob.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
     waveKnob.updateQuadInputs(sysState.inputs[16], sysState.inputs[17]);
 
+
     // store key presses in sysState
-    for(int i = 0; i < CHANNELS; i++)
+    for(int i = 0; i < 2*CHANNELS; i++)
     {
-      sysState.keyPressed[i] = keyPressedNew[i];
+      sysState.keyPressed[i] = keyPressedLocal[i];
     }
 
     // release systate mutex
@@ -583,8 +586,9 @@ void displayUpdateTask(void * pvParameters)
 
     // Print the keys that are pressed
     for (int i = 0; i < CHANNELS; i++) {
-      if (sysState.keyPressed[i] != -1) {
-        u8g2.print(keyNames[sysState.keyPressed[i]]);
+      if (sysState.keyPressed[i] != 0xFFFF) {
+        
+        u8g2.print(keyNames[sysState.keyPressed[i] & 0xFF]);
         u8g2.print(" ");
       }
     }
@@ -728,10 +732,10 @@ void setup() {
   msgInQ = xQueueCreate(36,8);
   msgOutQ = xQueueCreate(36,8);
 
-  // init keyPressed to all -1
-  for(int i = 0; i < CHANNELS; i++)
+  // init keyPressed to 0xFFFF (no key pressed)
+  for(int i = 0; i < 2*CHANNELS; i++)
   {
-    sysState.keyPressed[i] = -1;
+    sysState.keyPressed[i] = 0xFFFF;
   }
 
   // start key scanning thread
@@ -825,7 +829,7 @@ void setup() {
   sampleTimer.resume();
 
   // init CAN bus
-  CAN_Init(false); // true means it reads it's OWN CAN output
+  CAN_Init(true); // true means it reads it's OWN CAN output
   setCANFilter(0x123,0x7ff);
 
   // bind ISR to CAN RX event
