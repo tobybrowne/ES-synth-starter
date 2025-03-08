@@ -25,8 +25,9 @@
   bool sender = false;
   bool handshakePending = false;
 
-  bool westDetect;
-  bool eastDetect;
+  // only for debugging, can be deleted in final version
+  bool westDetect_temp_global;
+  bool eastDetect_temp_global;
 
   bool reverb = true;
   bool stereo = false;
@@ -95,7 +96,6 @@
   Knob waveKnob = Knob(0, 2, 0);
 
   // TODO: what variables should be volatile?
-  // TODO: merge currentStepSize with EXT
   // stores the current step sizes that should be played
   // first half stores internal key presses, second half stores external key presses
   // SHOULD JUST BE USED TO TRANSFER FREQS BETWEEN SCANKEYS AND SAMPLEISR
@@ -120,7 +120,8 @@
   // stores sine wave with SINE_RESOLUTION x-values with amplitude 127 to -127
   const int SINE_RESOLUTION_BITS = 8;
   const int SINE_RESOLUTION = 1 << SINE_RESOLUTION_BITS;  // 2^SINE_RESOLUTION_BITS
-  int sineLookup[SINE_RESOLUTION];
+
+  int sineLookup[SINE_RESOLUTION]; // populated in setup, only read from SampleISR
 
   bool octaveOverride = false;
 
@@ -325,6 +326,75 @@ int readJoystickHoriz()
     return (abs(joystick) < 5) ? 0 : joystick; // apply deadzone
 }
 
+// sets speaker voltage 22,000 times per sec
+// TODO: read systate and currentStepSize atomically
+void sampleISR()
+{
+  // stores phase for each channel wave separately
+  static uint32_t phaseAcc[CHANNELS*2] = {0};
+
+  // stores current voltage of speaker
+  int32_t Vout = 0;
+  
+  int waveType = waveKnob.getValue();
+  
+  for(int i = 0; i < CHANNELS*2; i++)
+  {
+    phaseAcc[i] += currentStepSize[i];
+    int32_t v_delta = 0;
+    // sawtooth wave
+    if(waveType == 0)
+    {
+      v_delta = (phaseAcc[i] >> 24) - 128;
+    }
+    // sine wave
+    else if(waveType == 1)
+    {
+      int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
+      v_delta = sineLookup[angle];
+    }
+    // square wave
+    else if(waveType == 2)
+    {
+      int threshold = (phaseAcc[i] > (1 << 31));
+      v_delta = (threshold * 256) - 128;
+    }
+
+    // Serial.println();
+    float newValue = 1.0 - ((float)channelTimes[i]/DAMPER_RESOLUTION);
+    // float newValue = 0.5;
+    v_delta = (float)v_delta * newValue;
+    // v_delta = v_delta >> 1;
+    if(currentStepSize[i] != 0) // need this idk why
+    {
+      Vout += v_delta;
+    }
+  }
+
+  // log-taper volume control
+  Vout = Vout >> (8 - volumeKnob.getValue());
+
+  // send volatage from 0-255 to speaker
+  Vout = constrain(Vout + 128, 0, 255);   
+  analogWrite(OUTR_PIN, Vout);
+}
+
+// attach/detach sampling ISR
+void toggleSampleISR(bool on)
+{
+  if(on)
+  { 
+    // initialise sampling interrupt (22,000 times a sec)
+    sampleTimer.setOverflow(22000, HERTZ_FORMAT);
+    sampleTimer.attachInterrupt(sampleISR);
+    sampleTimer.resume();
+  }
+  else
+  {
+    sampleTimer.detachInterrupt();
+  }
+}
+
 // task to check handshake inputs every 20ms
 // TODO: do we need to obtain mutex if we just read?
 void checkHandshakeTask(void * pvParameters)
@@ -333,6 +403,9 @@ void checkHandshakeTask(void * pvParameters)
   // forces a check on startup
   int lastWest = -1;
   int lastEast = -1;
+  int westDetect;
+  int eastDetect;
+  int lastSender = -1;
 
   const TickType_t xFrequency = 20/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -441,6 +514,12 @@ void checkHandshakeTask(void * pvParameters)
       }
     }
 
+    // if a change of board role...
+    if(lastSender != sender)
+    {
+      toggleSampleISR(!sender); // senders don't need this ISR
+      lastSender = sender;
+    }
     lastWest = westDetect;
     lastEast = eastDetect;
   }
@@ -720,8 +799,8 @@ void displayUpdateTask(void * pvParameters)
 
     textWidth = u8g2.getStrWidth("HAND");
     u8g2.setCursor(displayWidth - textWidth, 30);
-    u8g2.print(westDetect);
-    u8g2.print(eastDetect);
+    u8g2.print(westDetect_temp_global);
+    u8g2.print(eastDetect_temp_global);
 
     // push screen buffer to display
     u8g2.sendBuffer();
@@ -734,62 +813,7 @@ void displayUpdateTask(void * pvParameters)
   } 
 }
 
-// sets speaker voltage 22,000 times per sec
-// TODO: read systate and currentStepSize atomically
-void sampleISR()
-{
-  // TODO: make the ISR not be attached to a sender
-  // sender doesn't play notes
-  if(sender) return;
 
-  // stores phase for each channel wave separately
-  static uint32_t phaseAcc[CHANNELS*2] = {0};
-
-  // stores current voltage of speaker
-  int32_t Vout = 0;
-  
-  int waveType = waveKnob.getValue();
-  // 
-  for(int i = 0; i < CHANNELS*2; i++)
-  {
-    phaseAcc[i] += currentStepSize[i];
-    int32_t v_delta = 0;
-    // sawtooth wave
-    if(waveType == 0)
-    {
-      v_delta = (phaseAcc[i] >> 24) - 128;
-    }
-    // sine wave
-    else if(waveType == 1)
-    {
-      int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
-      v_delta = sineLookup[angle];
-    }
-    // square wave
-    else if(waveType == 2)
-    {
-      int threshold = (phaseAcc[i] > (1 << 31));
-      v_delta = (threshold * 256) - 128;
-    }
-
-    // Serial.println();
-    float newValue = 1.0 - ((float)channelTimes[i]/DAMPER_RESOLUTION);
-    // float newValue = 0.5;
-    v_delta = (float)v_delta * newValue;
-    // v_delta = v_delta >> 1;
-    if(currentStepSize[i] != 0) // need this idk why
-    {
-      Vout += v_delta;
-    }
-  }
-
-  // log-taper volume control
-  Vout = Vout >> (8 - volumeKnob.getValue());
-
-  // send volatage from 0-255 to speaker
-  Vout = constrain(Vout + 128, 0, 255);   
-  analogWrite(OUTR_PIN, Vout);
-}
 
 // scan TX mailbox and wait until a mailbox is available
 void sendCanTask (void * pvParameters) {
@@ -805,6 +829,8 @@ void sendCanTask (void * pvParameters) {
 void CAN_TX_ISR (void) {
 	xSemaphoreGiveFromISR(CAN_TX_Semaphore, NULL);
 }
+
+
 
 void setup() {
   // compute step sizes from key frequencies
@@ -924,13 +950,6 @@ void setup() {
   //Initialise UART
   Serial.begin(9600);
   Serial.println("Hello World");
-
-  #ifndef TEST_SCAN_KEYS
-  // initialise sampling interrupt (22,000 times a sec)
-  sampleTimer.setOverflow(22000, HERTZ_FORMAT);
-  sampleTimer.attachInterrupt(sampleISR);
-  sampleTimer.resume();
-  #endif
 
   // init CAN bus
   CAN_Init(true); // true means it reads it's OWN CAN output
