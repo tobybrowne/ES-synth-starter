@@ -27,6 +27,8 @@
   bool westDetect;
   bool eastDetect;
 
+  bool reverb = true;
+
   int BOARD_ID;
   int ID_RECV = -1;
 
@@ -97,7 +99,7 @@
 
   // how long since the key was pressed
   // stores an int from 0 -> DAMPER_RESOLUTION
-  float DAMPER_RESOLUTION = 64;
+  float DAMPER_RESOLUTION = 30;
   volatile int channelTimes[2*CHANNELS] = {0};
 
   // TODO: make these memory safe by moving into sysState (described in Lab2)
@@ -354,14 +356,6 @@ void scanKeysTask(void * pvParameters)
       }
     } 
 
-    // convert key presses to step sizes (both internal and external)
-    for(int i = 0; i < 2*CHANNELS; i++)
-    {
-      uint8_t keyIndex = keyPressedLocal[i] & 0xFF;
-      uint8_t octave = (keyPressedLocal[i] >> 8) & 0xFF;
-      currentStepSize_Local[i] = (stepSizes[keyIndex] << octave) * (1 + static_cast<float>(joystick)/150);
-    }
-
     octave = octaveKnob.getValue();
     if((octave != lastOctave) && lastOctave != -1)
     {
@@ -506,30 +500,37 @@ void scanKeysTask(void * pvParameters)
     {
       bool found = false;
 
-      for(int j = 0; j < CHANNELS; j++)
+      // because if all channels are full then 0xFFFF won't be seen in sysState
+      // and then be included as a key press
+      if(keyPressedLocal[i] != 0xFFFF)
       {
-        uint8_t keyIndex = sysState.keyPressed[j] & 0xFF;
-        uint8_t octave = (sysState.keyPressed[j] >> 8) & 0xFF;
-        // dont compare octaves incase the keyboard octave is changed
-        if(keyIndex == (keyPressedLocal[i] & 0xFF))
-        {
-          found = true;
-        }
-      }
 
-      if(!found)
-      {
-        // send a "press" CAN message
-        // IF YOU SEND TWO CAN MESSAGES IN THE SAME TASK DOES ONE GET LOST
-        // DOES THE CAN TASK RUN WHILST THIS TASK IS RUNNING?
-        if(sender)
+        for(int j = 0; j < CHANNELS; j++)
         {
-          sendKeyPress('P', (keyPressedLocal[i] >> 8) & 0xFF, keyPressedLocal[i] & 0xFF);
+          uint8_t keyIndex = sysState.keyPressed[j] & 0xFF;
+          uint8_t octave = (sysState.keyPressed[j] >> 8) & 0xFF;
+          // dont compare octaves incase the keyboard octave is changed
+          if(keyIndex == (keyPressedLocal[i] & 0xFF))
+          {
+            found = true;
+          }
         }
-        
-        // TODO: make atomic
-        // set time since pressed to 0
-        __atomic_store_n(&channelTimes[i], 0, __ATOMIC_RELAXED);
+
+        // if exists in keyPressedLocal but not sysState.keyPressed
+        if(!found)
+        {
+          // send a "press" CAN message
+          // IF YOU SEND TWO CAN MESSAGES IN THE SAME TASK DOES ONE GET LOST
+          // DOES THE CAN TASK RUN WHILST THIS TASK IS RUNNING?
+          if(sender)
+          {
+            sendKeyPress('P', (keyPressedLocal[i] >> 8) & 0xFF, keyPressedLocal[i] & 0xFF);
+          }
+          
+          // TODO: make atomic
+          // set time since pressed to 0
+          __atomic_store_n(&channelTimes[i], 0, __ATOMIC_RELAXED);
+        }
       }
     }
 
@@ -542,7 +543,47 @@ void scanKeysTask(void * pvParameters)
     // store key presses in sysState
     for(int i = 0; i < 2*CHANNELS; i++)
     {
-      sysState.keyPressed[i] = keyPressedLocal[i];
+      if(reverb)
+      {
+        if(keyPressedLocal[i] != 0xFFFF)
+        {
+          bool found = false;
+          for(int j = 0; j < 2*CHANNELS; j++)
+          {
+            if(keyPressedLocal[i] == sysState.keyPressed[j])
+            {
+              found = true;
+            }
+          }
+
+          if(found == false)
+          {
+            sysState.keyPressed[i] = keyPressedLocal[i];
+          } 
+        }
+        else
+        {
+          if(channelTimes[i] > DAMPER_RESOLUTION - 1)
+          {
+            sysState.keyPressed[i] = 0xFFFF;
+          }
+        }
+      }
+      else
+      {
+        sysState.keyPressed[i] = keyPressedLocal[i];
+      }
+    }
+
+    // convert key presses to step sizes (both internal and external)
+    for(int i = 0; i < 2*CHANNELS; i++)
+    {
+      if(sysState.keyPressed[i] != 0xFFFF)
+      {
+        uint8_t keyIndex = sysState.keyPressed[i] & 0xFF;
+        uint8_t octave = (sysState.keyPressed[i] >> 8) & 0xFF;
+        currentStepSize_Local[i] = (stepSizes[keyIndex] << octave) * (1 + static_cast<float>(joystick)/150);
+      }
     }
 
     // release systate mutex
