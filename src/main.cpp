@@ -22,21 +22,12 @@
 // We use atomic stores, in case the variable being written to is read in an ISR, which may be called mid-way through the writing process.
 // An atomic load is used when a variable is being read from which may be being written to at the same time (we don't have this case in our code)
 
+// We use VOLATILE for variables which are modified in an ISR and read in an RTOS task
 
-  bool sender = false;
-  bool handshakePending = false;
-
-  bool reverb = true;
-  bool stereo = false;
-
-  bool rightBoard = false;
-
-  int BOARD_ID;
-  int ID_RECV = -1;
-
-  // only written to in handshake check (does it need a mutex)?
+  // only written to in handshake check (done atomically)
+  // read from in scanKeysTask
   // last two are west and east (they've both been turned on)
-  int outBits[7] = {0, 0, 0, 1, 1, 1, 1};
+  int outBits[7] = {0, 0, 0, 1, 1, 1, 1}; // thread-safe
   
 //Constants
   const uint32_t interval = 100; //Display update interval
@@ -84,14 +75,28 @@
   {
     std::bitset<32> inputs;
     uint16_t keyPressed[CHANNELS*2]; // stores octave-index pairs for all keys pressed 
+    bool sender = false;
+    bool handshakePending = false;
+  
+    bool reverb = true;
+    bool stereo = false;
+  
+    bool rightBoard = false;
+    int BOARD_ID;
+  
+    int ID_RECV = -1;
+
+    bool octaveOverride = false;
+  
     SemaphoreHandle_t mutex; 
   } sysState;
+
 
   // knob inits
   Knob volumeKnob = Knob(0, 8, 5);
   Knob octaveKnob = Knob(0, 8, 3);
   Knob waveKnob = Knob(0, 2, 0);
-  Knob InstrumentKnob = Knob(0,1,0);
+  Knob InstrumentKnob = Knob(0, 1, 1);
 
   // TODO: what variables should be volatile?
   // stores the current step sizes that should be played
@@ -102,7 +107,7 @@
   // how long since the key was pressed
   // stores an int from 0 -> DAMPER_RESOLUTION
   float DAMPER_RESOLUTION = 30;
-  volatile int channelTimes[2*CHANNELS] = {0};
+  volatile int channelTimes[2*CHANNELS] = {0}; // 
 
   // TODO: make these memory safe by moving into sysState (described in Lab2)
   // stores the last sent/received CAN message
@@ -120,7 +125,6 @@
 
   int sineLookup[SINE_RESOLUTION]; // populated in setup, only read from SampleISR
 
-  bool octaveOverride = false;
 
 //Display driver objects
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
@@ -179,12 +183,15 @@ void receiveCanTask(void * pvParameters)
     // yields the CPU to other tasks in the meantime
     xQueueReceive(msgInQ, RX_Message, portMAX_DELAY);
 
+    // take systate mutex
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+
     uint8_t action = RX_Message[0];
     
     // octave change
     if(RX_Message[0] == 'O')
     {
-      octaveOverride = true; // prevents these changes also being broadcasted on CAN
+      sysState.octaveOverride = true; // prevents these changes also being broadcasted on CAN
       int8_t octave = (int8_t)RX_Message[1]; // needs to be signed
       octaveCurrent = octaveKnob.getValue();
       octaveKnob.setValue(octaveCurrent + (int)octave);
@@ -198,11 +205,11 @@ void receiveCanTask(void * pvParameters)
       int rightVolume = stereoBalance / 2;
 
       // only the right board will receive this but we provide for completeness...
-      if(BOARD_ID == 0) 
+      if(sysState.BOARD_ID == 0) 
       {
         volumeKnob.setValue(leftVolume);
       }
-      else if(rightBoard)
+      else if(sysState.rightBoard)
       {
         volumeKnob.setValue(rightVolume);
       }
@@ -211,18 +218,18 @@ void receiveCanTask(void * pvParameters)
     // receive ID during handshake
     if(RX_Message[0] == 'I')
     {
-      if(handshakePending)
+      if(sysState.handshakePending)
       {
-         ID_RECV = RX_Message[1];
+        sysState.ID_RECV = RX_Message[1];
       }
     }
     else if(RX_Message[0] == 'E')
     {
       // turn east back on
-      outBits[6] = 1; 
+      __atomic_store_n(&outBits[6], 1, __ATOMIC_RELAXED);
     }
 
-    if(!sender)
+    if(!sysState.sender)
     {
       uint8_t octave = RX_Message[1];
       uint8_t key = RX_Message[2];
@@ -256,6 +263,9 @@ void receiveCanTask(void * pvParameters)
         } 
       }
     }
+
+    // release systate mutex
+    xSemaphoreGive(sysState.mutex);
   }
 }
 
@@ -418,6 +428,9 @@ void checkHandshakeTask(void * pvParameters)
   {
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
+    // take systate mutex
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+
     // check CAN inputs for keyboards on left and right
     westDetect = !sysState.inputs[23];
     eastDetect = !sysState.inputs[27];
@@ -426,21 +439,23 @@ void checkHandshakeTask(void * pvParameters)
     if(lastEast == 0 && eastDetect == 1)
     {
       // keyboard plugged into right
-      if(BOARD_ID != -1)
+      if(sysState.BOARD_ID != -1)
       {
         // turn east off
-        outBits[6] = 0;
+        __atomic_store_n(&outBits[6], 0, __ATOMIC_RELAXED);
         setOutMuxBit(HKOE_BIT, LOW);
 
         // I DONT KNOW WHY I NEED THIS BUT IT BREAKS OTHERWISE :/
-        handshakePending = true;
-        ID_RECV = -1;
+        sysState.handshakePending = true;
+        sysState.ID_RECV = -1;
+        xSemaphoreGive(sysState.mutex);
         vTaskDelay(pdMS_TO_TICKS(1000));
-        handshakePending = false;
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        sysState.handshakePending = false;
 
         // send the board it's id
         delay(500);
-        sendID(BOARD_ID+1);
+        sendID(sysState.BOARD_ID+1);
       }
     }
     // east HIGH to LOW
@@ -474,59 +489,64 @@ void checkHandshakeTask(void * pvParameters)
 
       // wait for CAN message to be received
       // we yield CPU access so other tasks can run in this time
-      handshakePending = true;
-      ID_RECV = -1;
+      sysState.handshakePending = true;
+      sysState.ID_RECV = -1;
+      xSemaphoreGive(sysState.mutex);
       vTaskDelay(pdMS_TO_TICKS(1000));
-      handshakePending = false;
+      xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+      sysState.handshakePending = false;
       
-      BOARD_ID = ID_RECV;
-      sender = true;
-      if(ID_RECV == -1) // this is the left-most board
+      sysState.BOARD_ID = sysState.ID_RECV;
+      sysState.sender = true;
+      if(sysState.ID_RECV == -1) // this is the left-most board
       {
-        BOARD_ID = 0;
-        sender = false;
+        sysState.BOARD_ID = 0;
+        sysState.sender = false;
 
-        rightBoard = false;
+        sysState.rightBoard = false;
       }
       
-      octaveKnob.setValue(BOARD_ID);
-      octaveOverride = true;
+      octaveKnob.setValue(sysState.BOARD_ID);
+      sysState.octaveOverride = true;
 
       // turn east off
-      outBits[6] = 0;
+      __atomic_store_n(&outBits[6], 0, __ATOMIC_RELAXED);
       setOutMuxBit(HKOE_BIT, LOW);
 
       // send board it's new ID
       delay(500);
-      sendID(BOARD_ID+1);
+      sendID(sysState.BOARD_ID+1);
 
       // if you are the rightmost board then finish the handshaking sequence
       if(!eastDetect)
       {
-        if(BOARD_ID != 0)
+        if(sysState.BOARD_ID != 0)
         {
-          rightBoard = true;
+          sysState.rightBoard = true;
         }
         
         // send a "end handshake" CAN message
         sendEndHandshake();
 
         // in stereo mode both left and right boards receive
-        if(stereo)
+        if(sysState.stereo)
         {
-          sender = false;
+          sysState.sender = false;
         }
       }
     }
 
     // if a change of board role...
-    if(lastSender != sender)
+    if(lastSender != sysState.sender)
     {
-      toggleSampleISR(!sender); // senders don't need this ISR
-      lastSender = sender;
+      toggleSampleISR(!sysState.sender); // senders don't need this ISR
+      lastSender = sysState.sender;
     }
     lastWest = westDetect;
     lastEast = eastDetect;
+
+    // release systate mutex
+    xSemaphoreGive(sysState.mutex);
   }
 }
 
@@ -563,7 +583,7 @@ void scanKeysTask(void * pvParameters)
     if(joystick_horiz != last_joystick_horiz)
     {
       // sends message to right board 
-      if(BOARD_ID == 0 && stereo)
+      if(sysState.BOARD_ID == 0 && sysState.stereo)
       {
         // Scale from [-100, 100] to [0, 16]
         int stereoBalance = constrain(joystick_horiz, -100, 100);
@@ -625,9 +645,9 @@ void scanKeysTask(void * pvParameters)
     octave = octaveKnob.getValue();
     if((octave != lastOctave) && lastOctave != -1)
     {
-      if(octaveOverride)
+      if(sysState.octaveOverride)
       {
-        octaveOverride = false; // reset flag
+        sysState.octaveOverride = false; // reset flag
         lastOctave = octave;
       }
       else
@@ -652,7 +672,8 @@ void scanKeysTask(void * pvParameters)
       // if keyIndex is NOT in localKeys itss released
       if (localKeys.find(keyIndex) == localKeys.end())
       {
-        if (sender) {
+        if(sysState.sender)
+        {
             sendKeyPress('R', octave, keyIndex);
         }
       }
@@ -673,7 +694,7 @@ void scanKeysTask(void * pvParameters)
       // if keyIndex is NOT found in activeKeys its a new press
       if (activeKeys.find(keyIndex) == activeKeys.end())
       {
-        if (sender)
+        if (sysState.sender)
         {
           sendKeyPress('P', (keyPressedLocal[i] >> 8) & 0xFF, keyIndex);
         }
@@ -686,7 +707,7 @@ void scanKeysTask(void * pvParameters)
     octaveKnob.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
     waveKnob.updateQuadInputs(sysState.inputs[16], sysState.inputs[17]);
     InstrumentKnob.updateQuadInputs(sysState.inputs[18], sysState.inputs[19]); 
-    if(!stereo) // no knob volume control in stereo mode
+    if(!sysState.stereo) // no knob volume control in stereo mode
     {
       volumeKnob.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
     }
@@ -694,7 +715,7 @@ void scanKeysTask(void * pvParameters)
     // store key presses in sysState and manage reverb
     for(int i = 0; i < 2*CHANNELS; i++)
     {
-      if(reverb)
+      if(sysState.reverb)
       {
         if(keyPressedLocal[i] != 0xFFFF)
         {
@@ -773,7 +794,7 @@ void displayUpdateTask(void * pvParameters)
     int displayWidth = u8g2.getDisplayWidth();
     int textWidth = u8g2.getStrWidth("00"); // RECV and SEND have same width
     u8g2.setCursor(displayWidth - textWidth, 10);
-    u8g2.print(BOARD_ID);
+    u8g2.print(sysState.BOARD_ID);
 
     // display octave of current keyboard
     u8g2.setCursor(2,20);
@@ -803,7 +824,7 @@ void displayUpdateTask(void * pvParameters)
     // u8g2.print(RX_Message[1]);
     // u8g2.print(RX_Message[2]);
 
-    if(handshakePending)
+    if(sysState.handshakePending)
     {
       textWidth = u8g2.getStrWidth("HAND");
       u8g2.setCursor(displayWidth - textWidth, 10);
@@ -950,6 +971,7 @@ void setup() {
   // allows east/west signals to stabilise before they are read (IMPORTANT)
   delay(1000);
   
+  // toggleSampleISR(true);
 
   //Initialise UART
   Serial.begin(9600);
