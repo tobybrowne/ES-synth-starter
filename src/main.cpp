@@ -7,6 +7,8 @@
 #include <cstring>
 #include <unordered_set>
 
+// #define TEST_SCAN_KEYS
+
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
 // THE ISR MAY INTERRUPT A PROCESS AT ANY POINTS, ALWAYS REMEMBER
@@ -323,9 +325,126 @@ int readJoystickHoriz()
     return (abs(joystick) < 5) ? 0 : joystick; // apply deadzone
 }
 
+// task to check handshake inputs every 20ms
+// TODO: do we need to obtain mutex if we just read?
+void checkHandshakeTask(void * pvParameters)
+{
+  // stores last state of east/west
+  // forces a check on startup
+  int lastWest = -1;
+  int lastEast = -1;
 
+  const TickType_t xFrequency = 20/portTICK_PERIOD_MS;
+  TickType_t xLastWakeTime = xTaskGetTickCount();
 
+  while(1)
+  {
+    vTaskDelayUntil( &xLastWakeTime, xFrequency );
 
+    // check CAN inputs for keyboards on left and right
+    westDetect = !sysState.inputs[23];
+    eastDetect = !sysState.inputs[27];
+
+    // east LOW to HIGH
+    if(lastEast == 0 && eastDetect == 1)
+    {
+      // keyboard plugged into right
+      if(BOARD_ID != -1)
+      {
+        // turn east off
+        outBits[6] = 0;
+        setOutMuxBit(HKOE_BIT, LOW);
+
+        // I DONT KNOW WHY I NEED THIS BUT IT BREAKS OTHERWISE :/
+        handshakePending = true;
+        ID_RECV = -1;
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        handshakePending = false;
+
+        // send the board it's id
+        delay(500);
+        sendID(BOARD_ID+1);
+      }
+    }
+    // east HIGH to LOW
+    else if(lastEast == 1 && eastDetect == 0)
+    { 
+      // keyboard on right removed
+      // DO NOTHING
+    }
+    // west LOW to HIGH
+    if(lastWest == 0 && westDetect == 1)
+    {
+      // keyboard is plugged into left
+      // DO NOTHING HANDSHAKE HASNT STARTED
+      // OR
+      // signals being reset after after handshake
+      // DO NOTHING
+    }
+
+    // west HIGH to LOW
+    // keyboard on left unplugged
+    // OR keyboard on left finished handshake
+    // OR startup of the leftmost board
+    // this assumes we dont plug a keyboard in when the rest are in handshake mode (cos west would then be low)
+    else if((lastWest == 1 && westDetect == 0) || (lastWest == -1 && westDetect == 0))
+    {
+      // keyboard on left unplugged
+      // START HANDSHAKE
+      // OR
+      // keyboard on left finished handshake
+      // START HANDSHAKE
+
+      // yield task so that CAN messages can be received
+      handshakePending = true;
+      ID_RECV = -1;
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      handshakePending = false;
+      
+      BOARD_ID = ID_RECV;
+      sender = true;
+      if(ID_RECV == -1) // this is the left-most board
+      {
+        BOARD_ID = 0;
+        sender = false;
+
+        rightBoard = false;
+      }
+      
+      octaveKnob.setValue(BOARD_ID);
+      octaveOverride = true;
+
+      // turn east off
+      outBits[6] = 0;
+      setOutMuxBit(HKOE_BIT, LOW);
+
+      // send board it's new ID
+      delay(500);
+      sendID(BOARD_ID+1);
+
+      // if you are the rightmost board then finish the handshaking sequence
+      if(!eastDetect)
+      {
+        if(BOARD_ID != 0)
+        {
+          rightBoard = true;
+        }
+        
+        // send a "end handshake" CAN message
+        sendEndHandshake();
+
+        // in stereo mode both left and right boards receive
+        if(stereo)
+        {
+          sender = false;
+        }
+      }
+    }
+
+    lastWest = westDetect;
+    lastEast = eastDetect;
+  }
+}
 
 // task to check keys pressed runs every 20ms
 void scanKeysTask(void * pvParameters)
@@ -335,11 +454,6 @@ void scanKeysTask(void * pvParameters)
 
   // stores latest key presses before being stored globally
   uint16_t keyPressedLocal[CHANNELS*2];
-
-  // stores last state of east/west
-  // forces a check on startup
-  int lastWest = -1;
-  int lastEast = -1;
 
   int octave = 0;
   int lastOctave = -1;
@@ -440,117 +554,6 @@ void scanKeysTask(void * pvParameters)
       }
     }
 
-    // check CAN inputs for keyboards on left and right
-    westDetect = !sysState.inputs[23];
-    eastDetect = !sysState.inputs[27];
-
-    // east LOW to HIGH
-    if(lastEast == 0 && eastDetect == 1)
-    {
-      // keyboard plugged into right
-      if(BOARD_ID != -1)
-      {
-        // turn east off
-        outBits[6] = 0;
-        setOutMuxBit(HKOE_BIT, LOW);
-
-        // I DONT KNOW WHY I NEED THIS BUT IT BREAKS OTHERWISE :/
-        handshakePending = true;
-        ID_RECV = -1;
-        xSemaphoreGive(sysState.mutex);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-        handshakePending = false;
-
-        // send the board it's id
-        delay(500);
-        sendID(BOARD_ID+1);
-      }
-    }
-    // east HIGH to LOW
-    else if(lastEast == 1 && eastDetect == 0)
-    { 
-      // keyboard on right removed
-      // DO NOTHING
-    }
-    // west LOW to HIGH
-    if(lastWest == 0 && westDetect == 1)
-    {
-      // keyboard is plugged into left
-      // DO NOTHING HANDSHAKE HASNT STARTED
-
-      // OR
-
-      // signals being reset after after handshake
-      // DO NOTHING
-    }
-
-    // west HIGH to LOW
-    // keyboard on left unplugged
-    // OR keyboard on left finished handshake
-    // OR startup of the leftmost board
-    // this assumes we dont plug a keyboard in when the rest are in handshake mode (cos west would then be low)
-    else if((lastWest == 1 && westDetect == 0) || (lastWest == -1 && westDetect == 0))
-    {
-      // keyboard on left unplugged
-      // START HANDSHAKE
-
-      // OR
-
-      // keyboard on left finished handshake
-      // START HANDSHAKE
-
-      // yield task so that CAN messages can be received
-      handshakePending = true;
-      ID_RECV = -1;
-      xSemaphoreGive(sysState.mutex);
-      vTaskDelay(pdMS_TO_TICKS(1000));
-      xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-      handshakePending = false;
-      
-      BOARD_ID = ID_RECV;
-      sender = true;
-      if(ID_RECV == -1) // this is the left-most board
-      {
-        BOARD_ID = 0;
-        sender = false;
-
-        rightBoard = false;
-      }
-      
-      octaveKnob.setValue(BOARD_ID);
-      lastOctave = BOARD_ID;
-
-      // turn east off
-      outBits[6] = 0;
-      setOutMuxBit(HKOE_BIT, LOW);
-
-      // send board it's new ID
-      delay(500);
-      sendID(BOARD_ID+1);
-
-      // if you are the rightmost board then finish the handshaking sequence
-      if(!eastDetect)
-      {
-        if(BOARD_ID != 0)
-        {
-          rightBoard = true;
-        }
-        
-        // send a "end handshake" CAN message
-        sendEndHandshake();
-
-        // in stereo mode both left and right boards receive
-        if(stereo)
-        {
-          sender = false;
-        }
-      }
-    }
-
-    lastWest = westDetect;
-    lastEast = eastDetect;
-
     // check for key releases
     std::unordered_set<uint8_t> localKeys; // cache key indexes for quick lookup
     for (int j = 0; j < CHANNELS; j++)
@@ -645,7 +648,6 @@ void scanKeysTask(void * pvParameters)
     }
   } 
 }
-
 
 // task to update OLED display every 100ms
 void displayUpdateTask(void * pvParameters)
@@ -826,6 +828,7 @@ void setup() {
     sysState.keyPressed[i] = 0xFFFF;
   }
 
+  
   // start key scanning thread
   TaskHandle_t scanKeysHandle = NULL;
   xTaskCreate(
@@ -836,6 +839,7 @@ void setup() {
   2,			/* Task priority */
   &scanKeysHandle );	/* Pointer to store the task handle */
 
+  #ifndef TEST_SCAN_KEYS
   // start screen update thread
   TaskHandle_t displayUpdate = NULL;
   xTaskCreate(
@@ -866,6 +870,16 @@ void setup() {
   NULL,			/* Parameter passed into the task */
   3,			/* Task priority */
   &sendCan );	/* Pointer to store the task handle */
+  #endif
+
+  TaskHandle_t checkHandshake = NULL;
+  xTaskCreate(
+  checkHandshakeTask,		/* Function that implements the task */
+  "checkHandshake",		/* Text name for the task */
+  256,      		/* Stack size in words, not bytes */
+  NULL,			/* Parameter passed into the task */
+  3,			/* Task priority */
+  &checkHandshake );	/* Pointer to store the task handle */
   
   // compute sine values for lookup table
   uint32_t phase = 0;
@@ -911,20 +925,24 @@ void setup() {
   Serial.begin(9600);
   Serial.println("Hello World");
 
+  #ifndef TEST_SCAN_KEYS
   // initialise sampling interrupt (22,000 times a sec)
   sampleTimer.setOverflow(22000, HERTZ_FORMAT);
   sampleTimer.attachInterrupt(sampleISR);
   sampleTimer.resume();
+  #endif
 
   // init CAN bus
   CAN_Init(true); // true means it reads it's OWN CAN output
   setCANFilter(0x123,0x7ff);
 
+  #ifndef TEST_SCAN_KEYS
   // bind ISR to CAN RX event
   CAN_RegisterRX_ISR(CAN_RX_ISR);
 
   // bind ISR to CAN MAILBOX FREE event
   CAN_RegisterTX_ISR(CAN_TX_ISR);
+  #endif
 
   CAN_Start();
 
