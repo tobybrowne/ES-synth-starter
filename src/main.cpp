@@ -4,6 +4,7 @@
 #include <STM32FreeRTOS.h>
 #include <math.h>
 #include <knob.h>
+#include <drum.h>
 #include <cstring>
 
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
@@ -66,7 +67,7 @@
   const int HKOE_BIT = 6;
 
   // how many keys can be pressed together
-  const int CHANNELS = 3;
+  const int CHANNELS = 12;
 
   // CAN message buffers
   QueueHandle_t msgInQ;
@@ -85,8 +86,9 @@
 
   // knob inits
   Knob volumeKnob = Knob(0, 8, 5);
-  Knob octaveKnob = Knob(0, 8, 0);
+  Knob octaveKnob = Knob(0, 8, 3);
   Knob waveKnob = Knob(0, 2, 0);
+  Knob InstrumentKnob = Knob(0,2,1);
 
   // TODO: what variables should be volatile?
   // TODO: merge currentStepSize with EXT
@@ -537,6 +539,7 @@ void scanKeysTask(void * pvParameters)
     volumeKnob.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
     octaveKnob.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
     waveKnob.updateQuadInputs(sysState.inputs[16], sysState.inputs[17]);
+    InstrumentKnob.updateQuadInputs(sysState.inputs[18], sysState.inputs[19]); 
 
 
     // store key presses in sysState
@@ -566,6 +569,7 @@ void displayUpdateTask(void * pvParameters)
   // strings used for display
   const char* keyNames [12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
   const char* waveTypes[3] = {"Saw", "Sine", "Square"};
+  const char* instrumentTypes[2] = {"Drums", "Piano"};
 
   while(1)
   {
@@ -608,16 +612,23 @@ void displayUpdateTask(void * pvParameters)
     u8g2.print("Wave: ");
     u8g2.print(waveTypes[waveKnob.getValue()]);
 
+    textWidth = u8g2.getStrWidth("Instr: ") + u8g2.getStrWidth(instrumentTypes[InstrumentKnob.getValue()]);
+    u8g2.setCursor(displayWidth - textWidth, 30);
+    u8g2.print("Instr: ");
+    u8g2.print(instrumentTypes[InstrumentKnob.getValue()]);
+
+
+
     // display volume of curren keyboard
     u8g2.setCursor(2,30);
     u8g2.print("Vol: ");
     u8g2.print(volumeKnob.getValue());
 
     // display last received CAN message
-    u8g2.setCursor(63,30);
-    u8g2.print((char) RX_Message[0]);
-    u8g2.print(RX_Message[1]);
-    u8g2.print(RX_Message[2]);
+    // u8g2.setCursor(63,30);
+    // u8g2.print((char) RX_Message[0]);
+    // u8g2.print(RX_Message[1]);
+    // u8g2.print(RX_Message[2]);
 
     if(handshakePending)
     {
@@ -628,8 +639,8 @@ void displayUpdateTask(void * pvParameters)
 
     textWidth = u8g2.getStrWidth("HAND");
     u8g2.setCursor(displayWidth - textWidth, 30);
-    u8g2.print(westDetect);
-    u8g2.print(eastDetect);
+    // u8g2.print(westDetect);
+    // u8g2.print(eastDetect);
 
     // push screen buffer to display
     u8g2.sendBuffer();
@@ -646,58 +657,61 @@ void displayUpdateTask(void * pvParameters)
 // TODO: read systate and currentStepSize atomically
 void sampleISR()
 {
-  // TODO: make the ISR not be attached to a sender
-  // sender doesn't play notes
-  if(sender) return;
+    if (sender) return; // The sender doesn't play notes
 
-  // stores phase for each channel wave separately
-  static uint32_t phaseAcc[CHANNELS*2] = {0};
+    static uint32_t phaseAcc[CHANNELS * 2] = {0};
+    int32_t Vout = 0;
 
-  // stores current voltage of speaker
-  int32_t Vout = 0;
-  
-  int waveType = waveKnob.getValue();
-  // 
-  for(int i = 0; i < CHANNELS*2; i++)
-  {
-    phaseAcc[i] += currentStepSize[i];
-    int32_t v_delta = 0;
-    // sawtooth wave
-    if(waveType == 0)
+    int waveType = waveKnob.getValue();
+
+
+    // Check if we're in synth mode (0) or drum mode (1)
+    if (InstrumentKnob.getValue() == 0) // Play Synthesizer
     {
-      v_delta = (phaseAcc[i] >> 24) - 128;
-    }
-    // sine wave
-    else if(waveType == 1)
-    {
-      int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
-      v_delta = sineLookup[angle];
-    }
-    // square wave
-    else if(waveType == 2)
-    {
-      int threshold = (phaseAcc[i] > (1 << 31));
-      v_delta = (threshold * 256) - 128;
+      drum(Vout);
     }
 
-    // Serial.println();
-    float newValue = 1.0 - ((float)channelTimes[i]/DAMPER_RESOLUTION);
-    // float newValue = 0.5;
-    v_delta = (float)v_delta * newValue;
-    // v_delta = v_delta >> 1;
-    if(currentStepSize[i] != 0) // need this idk why
-    {
-      Vout += v_delta;
-    }
-  }
+        
+        for (int i = 0; i < CHANNELS * 2; i++)
+        {
+            phaseAcc[i] += currentStepSize[i];
+            int32_t v_delta = 0;
 
-  // log-taper volume control
-  Vout = Vout >> (8 - volumeKnob.getValue());
+            // Generate waveform based on waveType
+            if (waveType == 0) // Sawtooth Wave
+            {
+                v_delta = (phaseAcc[i] >> 24) - 128;
+            }
+            else if (waveType == 1) // Sine Wave
+            {
+                int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
+                v_delta = sineLookup[angle];
+            }
+            else if (waveType == 2) // Square Wave
+            {
+                v_delta = (phaseAcc[i] > (1 << 31)) ? 127 : -128;
+            }
 
-  // send volatage from 0-255 to speaker
-  Vout = constrain(Vout + 128, 0, 255);   
-  analogWrite(OUTR_PIN, Vout);
+            // Apply damper effect
+            float newValue = 1.0 - ((float)channelTimes[i] / DAMPER_RESOLUTION);
+            v_delta = (float)v_delta * newValue;
+
+            // If note is active, add to output
+            if (currentStepSize[i] != 0) 
+            {
+                Vout += v_delta;
+            }
+        }
+    
+
+    // Apply volume control using logarithmic tapering
+    Vout = Vout >> (8 - volumeKnob.getValue());
+
+    // Ensure Vout stays within 0-255 range for DAC
+    Vout = constrain(Vout + 128, 0, 255);
+    analogWrite(OUTR_PIN, Vout);
 }
+
 
 // scan TX mailbox and wait until a mailbox is available
 void sendCanTask (void * pvParameters) {
