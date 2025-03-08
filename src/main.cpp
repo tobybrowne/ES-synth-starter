@@ -90,8 +90,21 @@
   // signed value from -1
   volatile int joystick = 0;
 
+  // ========= single buffer ==============
+
   // stores the current step sizes that should be played
-  volatile uint32_t currentStepSize[2*CHANNELS];
+  // single buffering
+  //volatile uint32_t currentStepSize[2*CHANNELS];
+
+  // ========= double buffer ==============
+
+  // double buffering 
+  volatile uint32_t stepSizeBuffer[2*CHANNELS][2];
+  volatile int activeBuffer = 0; // keeps track of active channel
+  SemaphoreHandle_t bufferMutex; // mutex for channel access
+
+  // =====================================
+
   // stores the current step sizes that should be played FROM OTHER BOARDS
   volatile uint32_t currentStepSize_EXT[CHANNELS] = {0};
 
@@ -516,13 +529,22 @@ void scanKeysTask(void * pvParameters)
 
     // release systate mutex
     xSemaphoreGive(sysState.mutex);
-  
+    
+    // =========== single buffering =================
     // atomic write to currentStepSize global
     // if the ISR only receives half of the updated values thats fine, but we can't have half-written elements
-    for(int i = 0; i < 2*CHANNELS; i++)
-    {
-      __atomic_store_n(&currentStepSize[i], currentStepSize_Local[i], __ATOMIC_RELAXED);
-    }
+    // for(int i = 0; i < 2*CHANNELS; i++)
+    // {
+    //   __atomic_store_n(&currentStepSize[i], currentStepSize_Local[i], __ATOMIC_RELAXED);
+    // }
+
+    // =========== double buffering ===============
+    int nonActiveBuffer = 1 - __atomic_load_n(&activeBuffer, __ATOMIC_RELAXED); // 1-active buffer 
+    xSemaphoreTake(bufferMutex, portMAX_DELAY); // lock active
+    xSemaphoreGive(bufferMutex); // unlock 
+
+    __atomic_store_n(&activeBuffer, nonActiveBuffer, __ATOMIC_RELEASE); // transfer data
+  
   } 
 }
 
@@ -549,7 +571,7 @@ void displayUpdateTask(void * pvParameters)
     
     // display notes pressed on current keyboard
     u8g2.setCursor(2,10);
-    u8g2.print("Keys: ");
+    // u8g2.print("Keys: ");
 
     // Print the keys that are pressed
     for (int i = 0; i < CHANNELS; i++) {
@@ -623,10 +645,24 @@ void sampleISR()
   int32_t Vout = 0;
   
   int waveType = waveKnob.getValue();
+
+  // double buffer logic 
+  // use relaxed because its not that deep
+  int bufferIndex = __atomic_load_n(&activeBuffer, __ATOMIC_RELAXED); 
+  volatile uint32_t*  currentBuffer = stepSizeBuffer[bufferIndex];
+
+  u8g2.setCursor(2,10);
+  u8g2.print("index: ");
+  u8g2.println(bufferIndex);
+
+  for(int i = 0; i < CHANNELS*2; i++){
+      phaseAcc[i] += currentBuffer[i];
+
   
-  for(int i = 0; i < CHANNELS*2; i++)
-  {
-    phaseAcc[i] += currentStepSize[i];
+  
+  // for(int i = 0; i < CHANNELS*2; i++)
+  // {
+  //   phaseAcc[i] += currentStepSize[i];
     
     // sawtooth wave
     if(waveType == 0)
@@ -678,6 +714,9 @@ void setup() {
 
   // create systate mutex
   sysState.mutex = xSemaphoreCreateMutex();
+
+  //create channel buffer mutex
+  bufferMutex = xSemaphoreCreateMutex();
 
   // init CAN mailbox semaphore
   CAN_TX_Semaphore = xSemaphoreCreateCounting(3,3);
