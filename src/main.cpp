@@ -498,7 +498,6 @@ void scanKeysTask(void * pvParameters)
           sendKeyPress('R', octave, keyIndex);
           sendKeyPress('R', octave, keyIndex);
         }
-        sendKeyPress('R', octave, keyIndex);
       }
     }
 
@@ -527,7 +526,6 @@ void scanKeysTask(void * pvParameters)
         {
           sendKeyPress('P', (keyPressedLocal[i] >> 8) & 0xFF, keyPressedLocal[i] & 0xFF);
         }
-        sendKeyPress('P', (keyPressedLocal[i] >> 8) & 0xFF, keyPressedLocal[i] & 0xFF);
         
         // TODO: make atomic
         // set time since pressed to 0
