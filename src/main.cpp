@@ -328,57 +328,59 @@ int readJoystickHoriz()
     return (abs(joystick) < 5) ? 0 : joystick; // apply deadzone
 }
 
+
 // sets speaker voltage 22,000 times per sec
 // TODO: read systate and currentStepSize atomically
 void sampleISR()
 {
-  // stores phase for each channel wave separately
-  static uint32_t phaseAcc[CHANNELS*2] = {0};
+    static uint32_t phaseAcc[CHANNELS * 2] = {0};
+    int32_t Vout = 0;
+    int waveType = waveKnob.getValue();
 
-  // stores current voltage of speaker
-  int32_t Vout = 0;
-  
-  int waveType = waveKnob.getValue();
-  
-  for(int i = 0; i < CHANNELS*2; i++)
-  {
-    phaseAcc[i] += currentStepSize[i];
-    int32_t v_delta = 0;
-    // sawtooth wave
-    if(waveType == 0)
+    // play drum overlay
+    if (InstrumentKnob.getValue() == 0)
     {
-      v_delta = (phaseAcc[i] >> 24) - 128;
+      Vout = drum();
     }
-    // sine wave
-    else if(waveType == 1)
+ 
+    for (int i = 0; i < CHANNELS * 2; i++)
     {
-      int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
-      v_delta = sineLookup[angle];
-    }
-    // square wave
-    else if(waveType == 2)
-    {
-      int threshold = (phaseAcc[i] > (1 << 31));
-      v_delta = (threshold * 256) - 128;
-    }
+        phaseAcc[i] += currentStepSize[i];
+        int32_t v_delta = 0;
 
-    // Serial.println();
-    float newValue = 1.0 - ((float)channelTimes[i]/DAMPER_RESOLUTION);
-    // float newValue = 0.5;
-    v_delta = (float)v_delta * newValue;
-    // v_delta = v_delta >> 1;
-    if(currentStepSize[i] != 0) // need this idk why
-    {
-      Vout += v_delta;
+        // Generate waveform based on waveType
+        if (waveType == 0) // Sawtooth Wave
+        {
+            v_delta = (phaseAcc[i] >> 24) - 128;
+        }
+        else if (waveType == 1) // Sine Wave
+        {
+            int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
+            v_delta = sineLookup[angle];
+        }
+        else if (waveType == 2) // Square Wave
+        {
+            v_delta = (phaseAcc[i] > (1 << 31)) ? 127 : -128;
+        }
+
+        // Apply damper effect
+        float newValue = 1.0 - ((float)channelTimes[i] / DAMPER_RESOLUTION);
+        v_delta = (float)v_delta * newValue;
+
+        // If note is active, add to output
+        if (currentStepSize[i] != 0) 
+        {
+            Vout += v_delta;
+        }
     }
-  }
+    
 
-  // log-taper volume control
-  Vout = Vout >> (8 - volumeKnob.getValue());
+    // Apply volume control using logarithmic tapering
+    Vout = Vout >> (8 - volumeKnob.getValue());
 
-  // send volatage from 0-255 to speaker
-  Vout = constrain(Vout + 128, 0, 255);   
-  analogWrite(OUTR_PIN, Vout);
+    // Ensure Vout stays within 0-255 range for DAC
+    Vout = constrain(Vout + 128, 0, 255);
+    analogWrite(OUTR_PIN, Vout);
 }
 
 // attach/detach sampling ISR
@@ -789,8 +791,7 @@ void displayUpdateTask(void * pvParameters)
     u8g2.print(instrumentTypes[InstrumentKnob.getValue()]);
 
 
-
-    // display volume of curren keyboard
+    // display volume of current keyboard
     u8g2.setCursor(2,30);
     u8g2.print("Vol: ");
     u8g2.print(volumeKnob.getValue());
@@ -808,11 +809,6 @@ void displayUpdateTask(void * pvParameters)
       u8g2.print("HAND");
     }
 
-    textWidth = u8g2.getStrWidth("HAND");
-    u8g2.setCursor(displayWidth - textWidth, 30);
-    u8g2.print(westDetect_temp_global);
-    u8g2.print(eastDetect_temp_global);
-
     // push screen buffer to display
     u8g2.sendBuffer();
 
@@ -824,64 +820,6 @@ void displayUpdateTask(void * pvParameters)
   } 
 }
 
-// sets speaker voltage 22,000 times per sec
-// TODO: read systate and currentStepSize atomically
-void sampleISR()
-{
-    if (sender) return; // The sender doesn't play notes
-
-    static uint32_t phaseAcc[CHANNELS * 2] = {0};
-    int32_t Vout = 0;
-
-    int waveType = waveKnob.getValue();
-
-
-    // Check if we're in synth mode (0) or drum mode (1)
-    if (InstrumentKnob.getValue() == 0) // Play Synthesizer
-    {
-      drum(Vout);
-    }
-
-        
-        for (int i = 0; i < CHANNELS * 2; i++)
-        {
-            phaseAcc[i] += currentStepSize[i];
-            int32_t v_delta = 0;
-
-            // Generate waveform based on waveType
-            if (waveType == 0) // Sawtooth Wave
-            {
-                v_delta = (phaseAcc[i] >> 24) - 128;
-            }
-            else if (waveType == 1) // Sine Wave
-            {
-                int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
-                v_delta = sineLookup[angle];
-            }
-            else if (waveType == 2) // Square Wave
-            {
-                v_delta = (phaseAcc[i] > (1 << 31)) ? 127 : -128;
-            }
-
-            // Apply damper effect
-            float newValue = 1.0 - ((float)channelTimes[i] / DAMPER_RESOLUTION);
-            v_delta = (float)v_delta * newValue;
-
-            // If note is active, add to output
-            if (currentStepSize[i] != 0) 
-            {
-                Vout += v_delta;
-            }
-        }
-    
-
-    // Apply volume control using logarithmic tapering
-    Vout = Vout >> (8 - volumeKnob.getValue());
-
-    // Ensure Vout stays within 0-255 range for DAC
-    Vout = constrain(Vout + 128, 0, 255);
-    analogWrite(OUTR_PIN, Vout);
-}
 
 
 // scan TX mailbox and wait until a mailbox is available
