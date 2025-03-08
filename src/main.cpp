@@ -7,6 +7,7 @@
 #include <drum.h>
 #include <cstring>
 #include <unordered_set>
+#include <ES_CAN.h>
 
 // #define TEST_SCAN_KEYS
 
@@ -21,14 +22,9 @@
 // We use atomic stores, in case the variable being written to is read in an ISR, which may be called mid-way through the writing process.
 // An atomic load is used when a variable is being read from which may be being written to at the same time (we don't have this case in our code)
 
-#include <ES_CAN.h>
 
   bool sender = false;
   bool handshakePending = false;
-
-  // only for debugging, can be deleted in final version
-  bool westDetect_temp_global;
-  bool eastDetect_temp_global;
 
   bool reverb = true;
   bool stereo = false;
@@ -38,10 +34,10 @@
   int BOARD_ID;
   int ID_RECV = -1;
 
-  int outBits[7] = {0, 0, 0, 1, 1, 1, 1};
-  int outBits_new[7] = {0, 0, 0, 0, 0, 0, 0};
+  // only written to in handshake check (does it need a mutex)?
   // last two are west and east (they've both been turned on)
-
+  int outBits[7] = {0, 0, 0, 1, 1, 1, 1};
+  
 //Constants
   const uint32_t interval = 100; //Display update interval
 
@@ -76,7 +72,7 @@
   // how many keys can be pressed together
   const int CHANNELS = 12;
 
-  // CAN message buffers
+  // CAN message buffers (these are thread safe!)
   QueueHandle_t msgInQ;
   QueueHandle_t msgOutQ;
 
@@ -110,8 +106,7 @@
 
   // TODO: make these memory safe by moving into sysState (described in Lab2)
   // stores the last sent/received CAN message
-  uint8_t TX_Message[8] = {0};
-  uint8_t RX_Message[8] = {0};
+  // only accessed in CAN RX task (mem safe)
 
   // frequencies for each key at octave 0
   const int keyFreqs[12] = {65, 69, 73, 78, 82, 87, 93, 98, 104, 110, 116, 123};
@@ -172,9 +167,11 @@ std::bitset<4> readCols()
 }
 
 // task to decode CAN messages in the RX buffer and play corresponding notes
-
+// READS: RX_Message, BOARD_ID, rightBoard, handshakePending
+// WRITES: octaveOverride, RX_Message, outBits, sysState (NO SEMAPHORE :/), ID_RECV
 void receiveCanTask(void * pvParameters)
 {
+  uint8_t RX_Message[8] = {0};
   int octaveCurrent;
   while(1)
   {
@@ -273,15 +270,16 @@ void CAN_RX_ISR (void) {
 // called to send an ID to another board for handshaking
 void sendID(int boardID)
 {
+  uint8_t TX_Message[8] = {0};
   // send a "release" CAN message
   TX_Message[0] = 'I';
   TX_Message[1] = boardID;
   xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
 }
 
-
 void sendKeyPress(char action, int octave, int keyPressed)
 {
+  uint8_t TX_Message[8] = {0};
   TX_Message[0] = action;
   TX_Message[1] = octave;
   TX_Message[2] = keyPressed;
@@ -290,6 +288,7 @@ void sendKeyPress(char action, int octave, int keyPressed)
 
 void sendEndHandshake()
 {
+  uint8_t TX_Message[8] = {0};
   TX_Message[0] = 'E';
   xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
 }
@@ -297,6 +296,7 @@ void sendEndHandshake()
 // send a +N octave message
 void sendChangeOctave(int octaveChange)
 {
+  uint8_t TX_Message[8] = {0};
   TX_Message[0] = 'O';
   TX_Message[1] = octaveChange;
   xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
@@ -305,6 +305,7 @@ void sendChangeOctave(int octaveChange)
 // takes in value from 0 (left) to 16 (right)
 void sendStereoBalance(int stereoBalance)
 {
+  uint8_t TX_Message[8] = {0};
   // send CAN message
   TX_Message[0] = 'B';
   TX_Message[1] = stereoBalance;
@@ -374,7 +375,6 @@ void sampleISR()
         }
     }
     
-
     // Apply volume control using logarithmic tapering
     Vout = Vout >> (8 - volumeKnob.getValue());
 
@@ -472,7 +472,8 @@ void checkHandshakeTask(void * pvParameters)
       // keyboard on left finished handshake
       // START HANDSHAKE
 
-      // yield task so that CAN messages can be received
+      // wait for CAN message to be received
+      // we yield CPU access so other tasks can run in this time
       handshakePending = true;
       ID_RECV = -1;
       vTaskDelay(pdMS_TO_TICKS(1000));
@@ -820,8 +821,6 @@ void displayUpdateTask(void * pvParameters)
   } 
 }
 
-
-
 // scan TX mailbox and wait until a mailbox is available
 void sendCanTask (void * pvParameters) {
 	uint8_t msgOut[8];
@@ -836,8 +835,6 @@ void sendCanTask (void * pvParameters) {
 void CAN_TX_ISR (void) {
 	xSemaphoreGiveFromISR(CAN_TX_Semaphore, NULL);
 }
-
-
 
 void setup() {
   // compute step sizes from key frequencies
