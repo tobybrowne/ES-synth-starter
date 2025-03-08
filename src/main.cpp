@@ -5,6 +5,7 @@
 #include <math.h>
 #include <knob.h>
 #include <cstring>
+#include <unordered_set>
 
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
@@ -16,8 +17,6 @@
 
 // We use atomic stores, in case the variable being written to is read in an ISR, which may be called mid-way through the writing process.
 // An atomic load is used when a variable is being read from which may be being written to at the same time (we don't have this case in our code)
-
-// TODO: whammy bar will break everything, because step sizes will change which means releasing keys wont work
 
 #include <ES_CAN.h>
 
@@ -278,6 +277,15 @@ void sendChangeOctave(int octaveChange)
   xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
 }
 
+// reads the vertical joystick component [-100, 100]
+int readJoystickVert()
+{
+  // top is 777 bottom is 177
+  int joystick = constrain(analogRead(JOYY_PIN), 177, 777);
+  joystick = (-joystick + 477) / 3;
+  return (abs(joystick) < 5) ? 0 : joystick;
+}
+
 // task to check keys pressed runs every 20ms
 void scanKeysTask(void * pvParameters)
 {
@@ -295,6 +303,8 @@ void scanKeysTask(void * pvParameters)
   int octave = 0;
   int lastOctave = -1;
 
+  int joystick;
+
   while(1)
   {
     // ensures we sample keyboard only every 50ms
@@ -303,13 +313,11 @@ void scanKeysTask(void * pvParameters)
     // take systate mutex
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
 
-    // TODO: why can't we just access the actual global?
     // ensures we only access the actual variable once per loop
-
     uint32_t currentStepSize_Local[2*CHANNELS] = {0};
-    int newValue;
 
     // increment all times in channelTimes
+    int newValue;
     for(int i = 0; i < CHANNELS*2; i++)
     {
       newValue = channelTimes[i] + 1;
@@ -320,42 +328,39 @@ void scanKeysTask(void * pvParameters)
     // init all internal channels to 0xFFFF
     for(int i = 0; i < CHANNELS; i++){ keyPressedLocal[i] = 0xFFFF;}
 
-    // top is 777 bottom is 177
-    int joystick = constrain(analogRead(JOYY_PIN), 177, 777);
-    joystick = (-joystick + 477) / 3;
-    joystick = (abs(joystick) < 5) ? 0 : joystick;
+    // read joystick value [-100, +100]
+    joystick = readJoystickVert();
   
-    // get all 32 inputs
+    // read all 32 inputs into sysState.inputs and keyPressedLocal
+    int ch = 0;
     for(int i = 0; i < 8; i++ )
     {
       setRow(i);
-      digitalWrite(OUT_PIN, outBits[i]);
-      
+      if(i < 7) { digitalWrite(OUT_PIN, outBits[i]); } // reset MUX bits
       delayMicroseconds(3);
       std::bitset<4> columns = readCols();
-  
       int start_id = i * 4;
+      int index;
       for(int j = 0; j < 4; j++)
       {
-        sysState.inputs[start_id + j] = columns[j];
+        index = start_id + j;
+        sysState.inputs[index] = columns[j];
+
+        // move key data into keyPressedLocal
+        if(index < 12)
+        {
+          if(sysState.inputs[index] == 0) // if key pressed...
+          // only finite key presses at a time
+          if(ch < CHANNELS)
+          {
+            keyPressedLocal[ch] = (octave << 8) | index;
+            ch++;
+          }
+        }
       }  
     }
 
-    // check keyboard presses
-    int j = 0;
-    for(int i = 0; i < 12; i++)
-    {
-      if(sysState.inputs[i] == 0) // if key pressed...
-      {
-        // only finite key presses at a time
-        if(j < CHANNELS)
-        {
-          keyPressedLocal[j] = (octave << 8) | i;
-          j++;
-        }
-      }
-    } 
-
+    // manage sending octave change messages
     octave = octaveKnob.getValue();
     if((octave != lastOctave) && lastOctave != -1)
     {
@@ -471,66 +476,46 @@ void scanKeysTask(void * pvParameters)
     lastEast = eastDetect;
 
     // check for key releases
-    for(int i = 0; i < CHANNELS; i++)
+    std::unordered_set<uint8_t> localKeys; // cache key indexes for quick lookup
+    for (int j = 0; j < CHANNELS; j++)
     {
-      bool found = false;
+      localKeys.insert(keyPressedLocal[j] & 0xFF);
+    }
+    for (int i = 0; i < CHANNELS; i++)
+    {
       uint8_t keyIndex = sysState.keyPressed[i] & 0xFF;
       uint8_t octave = (sysState.keyPressed[i] >> 8) & 0xFF;
-      for(int j = 0; j < CHANNELS; j++)
-      {
-        if(keyIndex == (keyPressedLocal[j] & 0xFF))
-        {
-          found = true;
-        }
-      }
 
-      if(!found)
+      // if keyIndex is NOT in localKeys itss released
+      if (localKeys.find(keyIndex) == localKeys.end())
       {
-        // send a "release" CAN message
-        if(sender)
-        {
-          sendKeyPress('R', octave, keyIndex);
-          sendKeyPress('R', octave, keyIndex);
+        if (sender) {
+            sendKeyPress('R', octave, keyIndex);
         }
       }
     }
 
     // check for new presses
-    for(int i = 0; i < CHANNELS; i++)
+    std::unordered_set<uint8_t> activeKeys; // cache key indexes for quick lookup
+    for (int j = 0; j < CHANNELS; j++)
     {
-      bool found = false;
+      activeKeys.insert(sysState.keyPressed[j] & 0xFF);
+    }
+    for (int i = 0; i < CHANNELS; i++)
+    {
+      if (keyPressedLocal[i] == 0xFFFF) continue;  // skip empty keys
 
-      // because if all channels are full then 0xFFFF won't be seen in sysState
-      // and then be included as a key press
-      if(keyPressedLocal[i] != 0xFFFF)
+      uint8_t keyIndex = keyPressedLocal[i] & 0xFF;
+
+      // if keyIndex is NOT found in activeKeys its a new press
+      if (activeKeys.find(keyIndex) == activeKeys.end())
       {
-
-        for(int j = 0; j < CHANNELS; j++)
+        if (sender)
         {
-          uint8_t keyIndex = sysState.keyPressed[j] & 0xFF;
-          uint8_t octave = (sysState.keyPressed[j] >> 8) & 0xFF;
-          // dont compare octaves incase the keyboard octave is changed
-          if(keyIndex == (keyPressedLocal[i] & 0xFF))
-          {
-            found = true;
-          }
+          sendKeyPress('P', (keyPressedLocal[i] >> 8) & 0xFF, keyIndex);
         }
 
-        // if exists in keyPressedLocal but not sysState.keyPressed
-        if(!found)
-        {
-          // send a "press" CAN message
-          // IF YOU SEND TWO CAN MESSAGES IN THE SAME TASK DOES ONE GET LOST
-          // DOES THE CAN TASK RUN WHILST THIS TASK IS RUNNING?
-          if(sender)
-          {
-            sendKeyPress('P', (keyPressedLocal[i] >> 8) & 0xFF, keyPressedLocal[i] & 0xFF);
-          }
-          
-          // TODO: make atomic
-          // set time since pressed to 0
-          __atomic_store_n(&channelTimes[i], 0, __ATOMIC_RELAXED);
-        }
+        __atomic_store_n(&channelTimes[i], 0, __ATOMIC_RELAXED);
       }
     }
 
@@ -539,34 +524,18 @@ void scanKeysTask(void * pvParameters)
     octaveKnob.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
     waveKnob.updateQuadInputs(sysState.inputs[16], sysState.inputs[17]);
 
-
-    // store key presses in sysState
+    // store key presses in sysState and manage reverb
     for(int i = 0; i < 2*CHANNELS; i++)
     {
       if(reverb)
       {
         if(keyPressedLocal[i] != 0xFFFF)
         {
-          bool found = false;
-          for(int j = 0; j < 2*CHANNELS; j++)
-          {
-            if(keyPressedLocal[i] == sysState.keyPressed[j])
-            {
-              found = true;
-            }
-          }
-
-          if(found == false)
-          {
-            sysState.keyPressed[i] = keyPressedLocal[i];
-          } 
+          sysState.keyPressed[i] = keyPressedLocal[i];
         }
-        else
+        else if(channelTimes[i] > DAMPER_RESOLUTION - 1)
         {
-          if(channelTimes[i] > DAMPER_RESOLUTION - 1)
-          {
-            sysState.keyPressed[i] = 0xFFFF;
-          }
+          sysState.keyPressed[i] = 0xFFFF;
         }
       }
       else
@@ -597,6 +566,8 @@ void scanKeysTask(void * pvParameters)
     }
   } 
 }
+
+
 
 // task to update OLED display every 100ms
 void displayUpdateTask(void * pvParameters)
