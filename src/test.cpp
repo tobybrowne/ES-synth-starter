@@ -17,9 +17,10 @@ void test_checkHandshakeTask()
     {
         checkHandshakeTask(NULL);
     }
+    uint32_t endTime = micros();
   Serial.println("======== checkHandshakeTask test ========");
   Serial.print("Time: ");
-	Serial.print((micros()-startTime)/32);
+	Serial.print((endTime-startTime)/32);
   Serial.print(" us\n");
 }
 
@@ -40,32 +41,61 @@ void test_displayUpdateTask()
     {
 		displayUpdateTask(NULL);
 	}
+    uint32_t endTime = micros();
   Serial.println("======== displayUpdateTask test ========");
   Serial.print("Time: ");
-	Serial.print((micros()-startTime)/32);
+	Serial.print((endTime-startTime)/32);
   Serial.print(" us\n");
 }
 
 // code to benchmark sampleISR
 void test_sampleISR()
 {
+    // init worst possible test case here...
+    
+    // aims to remove any optimisations that occur from 0 values
+    for(int i = 0; i < 2*CHANNELS; i++)
+    {
+        currentStepSize[i] = stepSizes[0]; // every channel is playing a C note
+        channelTimes[i] = 10; // midway through it's press
+    }
+
+    // benchmark
+    uint32_t startTime = micros();
+    for (int iter = 0; iter < 32; iter++)
+    {
+        sampleISR();
+    }
+    uint32_t endTime = micros();
+    Serial.println("======== sampleISR test ========");
+    Serial.print("Time: ");
+    Serial.print((endTime-startTime)/32);
+    Serial.print(" us\n");
+}
+
+void test_receiveCanTask()
+{
   // init worst possible test case here...
   
-  // aims to remove any optimisations that occur from 0 values
-  for(int i = 0; i < 2*CHANNELS; i++)
+  // define 32 input messages
+  msgInQ = xQueueCreate(320,8);
+  uint8_t RX_Message_ISR[8];
+  RX_Message_ISR[0] = 'O';
+  RX_Message_ISR[1] = 1;
+  for(int i = 0; i < 32; i++)
   {
-    currentStepSize[i] = stepSizes[0]; // every channel is playing a C note
-    channelTimes[i] = 10; // midway through it's press
+    xQueueSend(msgInQ, RX_Message_ISR, NULL);
   }
 
   // benchmark
   uint32_t startTime = micros();
-	for (int iter = 0; iter < 32; iter++)
+  for (int iter = 0; iter < 32; iter++)
   {
-		sampleISR();
-	}
-  Serial.println("======== sampleISR test ========");
+    receiveCanTask(NULL);
+  }
+  uint32_t endTime = micros();
+  Serial.println("======== receiveCanTask test ========");
   Serial.print("Time: ");
-	Serial.print((micros()-startTime)/32);
+	Serial.print((endTime-startTime)/32);
   Serial.print(" us\n");
 }

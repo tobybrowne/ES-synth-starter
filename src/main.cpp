@@ -36,34 +36,6 @@
 //Constants
   const uint32_t interval = 100; //Display update interval
 
-//Pin definitions
-  //Row select and enable
-  const int RA0_PIN = D3;
-  const int RA1_PIN = D6;
-  const int RA2_PIN = D12;
-  const int REN_PIN = A5;
-
-  //Matrix input and output
-  const int C0_PIN = A2;
-  const int C1_PIN = D9;
-  const int C2_PIN = A6;
-  const int C3_PIN = D1;
-  const int OUT_PIN = D11;
-
-  //Audio analogue out
-  const int OUTL_PIN = A4;
-  const int OUTR_PIN = A3;
-
-  //Joystick analogue in
-  const int JOYY_PIN = A0;
-  const int JOYX_PIN = A1;
-
-  //Output multiplexer bits
-  const int DEN_BIT = 3;
-  const int DRST_BIT = 4;
-  const int HKOW_BIT = 5;
-  const int HKOE_BIT = 6;
-
   // CAN message buffers (these are thread safe!)
   QueueHandle_t msgInQ;
   QueueHandle_t msgOutQ;
@@ -71,29 +43,8 @@
   // controls acccess to the CAN mailboxes (hardware has 3)
   SemaphoreHandle_t CAN_TX_Semaphore;
 
-  // store inputs state
-  // struct
-  // {
-  //   std::bitset<32> inputs;
-  //   uint16_t keyPressed[CHANNELS*2]; // stores octave-index pairs for all keys pressed 
-  //   bool sender = false;
-  //   bool handshakePending = false;
-  
-  //   bool reverb = true;
-  //   bool stereo = false;
-  
-  //   bool rightBoard = false;
-  //   int BOARD_ID;
-  
-  //   int ID_RECV = -1;
-
-  //   bool octaveOverride = false;
-  
-  //   SemaphoreHandle_t mutex; 
-  // } 
-  
+  // store device state  
   SysState sysState;
-
 
   // knob inits
   Knob volumeKnob = Knob(0, 8, 5);
@@ -127,7 +78,6 @@
   const int SINE_RESOLUTION = 1 << SINE_RESOLUTION_BITS;  // 2^SINE_RESOLUTION_BITS
 
   int sineLookup[SINE_RESOLUTION]; // populated in setup, only read from SampleISR
-
 
 //Display driver objects
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
@@ -180,6 +130,7 @@ void receiveCanTask(void * pvParameters)
 {
   uint8_t RX_Message[8] = {0};
   int octaveCurrent;
+
   while(1)
   {
     // blocks until data is available
@@ -269,6 +220,10 @@ void receiveCanTask(void * pvParameters)
 
     // release systate mutex
     xSemaphoreGive(sysState.mutex);
+
+    #ifdef TESTING
+    break;
+    #endif
   }
 }
 
@@ -878,11 +833,16 @@ void sendCanTask (void * pvParameters) {
 		xQueueReceive(msgOutQ, msgOut, portMAX_DELAY);
 		xSemaphoreTake(CAN_TX_Semaphore, portMAX_DELAY);
 		CAN_TX(0x123, msgOut);
+
+    #ifdef TESTING
+    break;
+    #endif
 	}
 }
 
 // frees CAN semaphore when mailbox is available
-void CAN_TX_ISR (void) {
+void CAN_TX_ISR (void)
+{
 	xSemaphoreGiveFromISR(CAN_TX_Semaphore, NULL);
 }
 
@@ -1043,7 +1003,8 @@ void setup() {
 
   #ifdef TESTING
   test_sampleISR();
-  //test_displayUpdateTask();
+  test_receiveCanTask();
+  test_displayUpdateTask();
   //test_checkHandshakeTask();
   #endif
 }

@@ -13,23 +13,23 @@
 #include <ES_CAN.h>
 #include "main.h"
 
-// include some of the globals used
-extern const int CHANNELS;
+// include some of the globals used (that aren't defined in main.h)
 extern volatile uint32_t currentStepSize[2*CHANNELS];
 extern uint32_t stepSizes[12];
 extern volatile int channelTimes[2*CHANNELS];
-
-
-
 extern struct SysState sysState;
 extern QueueHandle_t msgOutQ;
+extern QueueHandle_t msgInQ;
 extern void displayUpdateTask(void * pvParameters);
 extern void checkHandshakeTask(void * pvParameters);
+extern void receiveCanTask(void * pvParameters);
 extern void sampleISR();
 
 // test functions used for profiling
 void test_checkHandshakeTask();
 void test_displayUpdateTask();
 void test_sampleISR();
+void test_receiveCanTask();
+
 
 #endif
