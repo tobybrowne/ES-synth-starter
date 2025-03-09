@@ -3,6 +3,6 @@
 #include <cmath>
 #include <Arduino.h>
 
-void drum(int32_t &Vout);
+int32_t drum(uint32_t phase, int32_t &Vout);
 
 #endif 
