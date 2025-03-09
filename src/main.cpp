@@ -530,8 +530,10 @@ void checkHandshakeTask(void * pvParameters)
 // task to check keys pressed runs every 20ms
 void scanKeysTask(void * pvParameters)
 {
+  #ifndef TESTING
   const TickType_t xFrequency = 20/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
+  #endif
 
   // stores latest key presses before being stored globally
   uint16_t keyPressedLocal[CHANNELS*2];
@@ -545,8 +547,10 @@ void scanKeysTask(void * pvParameters)
 
   while(1)
   {
+    #ifndef TESTING
     // ensures we sample keyboard only every 50ms
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
+    #endif
 
     // take systate mutex
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
@@ -608,15 +612,22 @@ void scanKeysTask(void * pvParameters)
         if(index < 12)
         {
           if(sysState.inputs[index] == 0) // if key pressed...
-          // only finite key presses at a time
-          if(ch < CHANNELS)
           {
-            keyPressedLocal[ch] = (octave << 8) | index;
-            ch++;
-          }
+            // only finite key presses at a time
+            if(ch < CHANNELS)
+            {
+              keyPressedLocal[ch] = (octave << 8) | index;
+              ch++;
+            }
+          }  
         }
       }  
     }
+
+    // override actual key presses - simulate all keys being pressed
+    #ifdef TESTING
+    for(int i = 0; i < CHANNELS; i++){ sysState.keyPressed[i] = 0x0000;}
+    #endif
 
     // manage sending octave change messages
     octave = octaveKnob.getValue();
@@ -729,6 +740,10 @@ void scanKeysTask(void * pvParameters)
     {
       __atomic_store_n(&currentStepSize[i], currentStepSize_Local[i], __ATOMIC_RELAXED);
     }
+
+    #ifdef TESTING
+    break;
+    #endif
   } 
 }
 
@@ -773,6 +788,7 @@ void displayUpdateTask(void * pvParameters)
 
     // Determine the width of the display
     int displayWidth = u8g2.getDisplayWidth();
+
     int textWidth = u8g2.getStrWidth("00"); // RECV and SEND have same width
     u8g2.setCursor(displayWidth - textWidth, 10);
     u8g2.print(sysState.BOARD_ID);
@@ -829,9 +845,12 @@ void displayUpdateTask(void * pvParameters)
 // scan TX mailbox and wait until a mailbox is available
 void sendCanTask (void * pvParameters) {
 	uint8_t msgOut[8];
-	while (1) {
+	while (1)
+  {
 		xQueueReceive(msgOutQ, msgOut, portMAX_DELAY);
+
 		xSemaphoreTake(CAN_TX_Semaphore, portMAX_DELAY);
+
 		CAN_TX(0x123, msgOut);
 
     #ifdef TESTING
@@ -1005,6 +1024,8 @@ void setup() {
   test_sampleISR();
   test_receiveCanTask();
   test_displayUpdateTask();
+  test_sendCanTask();
+  test_scanKeysTask();
   //test_checkHandshakeTask();
   #endif
 }
