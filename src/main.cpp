@@ -8,6 +8,10 @@
 #include <cstring>
 #include <unordered_set>
 #include <ES_CAN.h>
+#include "main.h"
+#include "test.h"
+
+#define TESTING
 
 // #define TEST_SCAN_KEYS
 
@@ -60,9 +64,6 @@
   const int HKOW_BIT = 5;
   const int HKOE_BIT = 6;
 
-  // how many keys can be pressed together
-  const int CHANNELS = 12;
-
   // CAN message buffers (these are thread safe!)
   QueueHandle_t msgInQ;
   QueueHandle_t msgOutQ;
@@ -71,25 +72,27 @@
   SemaphoreHandle_t CAN_TX_Semaphore;
 
   // store inputs state
-  struct
-  {
-    std::bitset<32> inputs;
-    uint16_t keyPressed[CHANNELS*2]; // stores octave-index pairs for all keys pressed 
-    bool sender = false;
-    bool handshakePending = false;
+  // struct
+  // {
+  //   std::bitset<32> inputs;
+  //   uint16_t keyPressed[CHANNELS*2]; // stores octave-index pairs for all keys pressed 
+  //   bool sender = false;
+  //   bool handshakePending = false;
   
-    bool reverb = true;
-    bool stereo = false;
+  //   bool reverb = true;
+  //   bool stereo = false;
   
-    bool rightBoard = false;
-    int BOARD_ID;
+  //   bool rightBoard = false;
+  //   int BOARD_ID;
   
-    int ID_RECV = -1;
+  //   int ID_RECV = -1;
 
-    bool octaveOverride = false;
+  //   bool octaveOverride = false;
   
-    SemaphoreHandle_t mutex; 
-  } sysState;
+  //   SemaphoreHandle_t mutex; 
+  // } 
+  
+  SysState sysState;
 
 
   // knob inits
@@ -107,7 +110,7 @@
   // how long since the key was pressed
   // stores an int from 0 -> DAMPER_RESOLUTION
   float DAMPER_RESOLUTION = 30;
-  volatile int channelTimes[2*CHANNELS] = {0}; // 
+  volatile int channelTimes[2*CHANNELS] = {0};
 
   // TODO: make these memory safe by moving into sysState (described in Lab2)
   // stores the last sent/received CAN message
@@ -356,33 +359,31 @@ void sampleISR()
  
     for (int i = 0; i < CHANNELS * 2; i++)
     {
-        phaseAcc[i] += currentStepSize[i];
-        int32_t v_delta = 0;
+      if (currentStepSize[i] == 0) { continue; };
 
-        // Generate waveform based on waveType
-        if (waveType == 0) // Sawtooth Wave
-        {
-            v_delta = (phaseAcc[i] >> 24) - 128;
-        }
-        else if (waveType == 1) // Sine Wave
-        {
-            int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
-            v_delta = sineLookup[angle];
-        }
-        else if (waveType == 2) // Square Wave
-        {
-            v_delta = (phaseAcc[i] > (1 << 31)) ? 127 : -128;
-        }
+      phaseAcc[i] += currentStepSize[i];
+      int32_t v_delta = 0;
 
-        // Apply damper effect
-        float newValue = 1.0 - ((float)channelTimes[i] / DAMPER_RESOLUTION);
-        v_delta = (float)v_delta * newValue;
+      // Generate waveform based on waveType
+      if (waveType == 0) // Sawtooth Wave
+      {
+          v_delta = (phaseAcc[i] >> 24) - 128;
+      }
+      else if (waveType == 1) // Sine Wave
+      {
+          int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
+          v_delta = sineLookup[angle];
+      }
+      else if (waveType == 2) // Square Wave
+      {
+          v_delta = (phaseAcc[i] > (1 << 31)) ? 127 : -128;
+      }
 
-        // If note is active, add to output
-        if (currentStepSize[i] != 0) 
-        {
-            Vout += v_delta;
-        }
+      // Apply damper effect
+      float newValue = 1.0f - (channelTimes[i] * (1.0f / DAMPER_RESOLUTION));
+      v_delta *= newValue;
+
+      Vout += v_delta;
     }
     
     // Apply volume control using logarithmic tapering
@@ -421,12 +422,16 @@ void checkHandshakeTask(void * pvParameters)
   int eastDetect;
   int lastSender = -1;
 
-  const TickType_t xFrequency = 20/portTICK_PERIOD_MS;
+  #ifndef TESTING
+  const TickType_t xFrequency = 150/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
+  #endif
 
   while(1)
   {
-    vTaskDelayUntil( &xLastWakeTime, xFrequency );
+    #ifndef TESTING
+    vTaskDelayUntil( &xLastWakeTime, xFrequency);
+    #endif
 
     // take systate mutex
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
@@ -449,11 +454,16 @@ void checkHandshakeTask(void * pvParameters)
         sysState.handshakePending = true;
         sysState.ID_RECV = -1;
         xSemaphoreGive(sysState.mutex);
+
+        #ifndef TESTING
         vTaskDelay(pdMS_TO_TICKS(1000));
+        #endif
+
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.handshakePending = false;
 
         // send the board it's id
+        // TODO: need to get rid of this
         delay(500);
         sendID(sysState.BOARD_ID+1);
       }
@@ -492,7 +502,13 @@ void checkHandshakeTask(void * pvParameters)
       sysState.handshakePending = true;
       sysState.ID_RECV = -1;
       xSemaphoreGive(sysState.mutex);
+
+      //  TODO: how do we characterise this in a test?
+      // TODO: could probably remove this (or shorten it) if CAN_RX was a higher priority
+      #ifndef TESTING
       vTaskDelay(pdMS_TO_TICKS(1000));
+      #endif
+
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);
       sysState.handshakePending = false;
       
@@ -502,7 +518,6 @@ void checkHandshakeTask(void * pvParameters)
       {
         sysState.BOARD_ID = 0;
         sysState.sender = false;
-
         sysState.rightBoard = false;
       }
       
@@ -514,6 +529,7 @@ void checkHandshakeTask(void * pvParameters)
       setOutMuxBit(HKOE_BIT, LOW);
 
       // send board it's new ID
+      // TODO: need to get rid of this
       delay(500);
       sendID(sysState.BOARD_ID+1);
 
@@ -539,7 +555,9 @@ void checkHandshakeTask(void * pvParameters)
     // if a change of board role...
     if(lastSender != sysState.sender)
     {
+      #ifndef TESTING
       toggleSampleISR(!sysState.sender); // senders don't need this ISR
+      #endif
       lastSender = sysState.sender;
     }
     lastWest = westDetect;
@@ -547,6 +565,10 @@ void checkHandshakeTask(void * pvParameters)
 
     // release systate mutex
     xSemaphoreGive(sysState.mutex);
+
+    #ifdef TESTING
+    break;
+    #endif
   }
 }
 
@@ -758,8 +780,10 @@ void scanKeysTask(void * pvParameters)
 // task to update OLED display every 100ms
 void displayUpdateTask(void * pvParameters)
 {
+  #ifndef TESTING
   const TickType_t xFrequency = 100/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
+  #endif
 
   // strings used for display
   const char* keyNames [12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
@@ -768,8 +792,10 @@ void displayUpdateTask(void * pvParameters)
 
   while(1)
   {
+    #ifndef TESTING
     // ensures we update screen every 100ms
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
+    #endif
 
     // take systate mutex
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
@@ -812,7 +838,6 @@ void displayUpdateTask(void * pvParameters)
     u8g2.print("Instr: ");
     u8g2.print(instrumentTypes[InstrumentKnob.getValue()]);
 
-
     // display volume of current keyboard
     u8g2.setCursor(2,30);
     u8g2.print("Vol: ");
@@ -839,6 +864,10 @@ void displayUpdateTask(void * pvParameters)
 
     // release systate mutex
     xSemaphoreGive(sysState.mutex);
+
+    #ifdef TESTING
+    break; // only run 1 iter for testing
+    #endif
   } 
 }
 
@@ -855,6 +884,19 @@ void sendCanTask (void * pvParameters) {
 // frees CAN semaphore when mailbox is available
 void CAN_TX_ISR (void) {
 	xSemaphoreGiveFromISR(CAN_TX_Semaphore, NULL);
+}
+
+// outputs timing data every 5 seconds
+void TaskMonitor(void *pvParameters) {
+  char statsBuffer[512];
+
+  while (1) {
+      vTaskGetRunTimeStats(statsBuffer);
+      Serial.println("Task Execution Time Stats:");
+      Serial.println(statsBuffer);
+
+      vTaskDelay(pdMS_TO_TICKS(5000));  // Print stats every 5 seconds
+  }
 }
 
 void setup() {
@@ -880,6 +922,7 @@ void setup() {
   }
 
   
+  #ifndef TESTING
   // start key scanning thread
   TaskHandle_t scanKeysHandle = NULL;
   xTaskCreate(
@@ -890,7 +933,6 @@ void setup() {
   2,			/* Task priority */
   &scanKeysHandle );	/* Pointer to store the task handle */
 
-  #ifndef TEST_SCAN_KEYS
   // start screen update thread
   TaskHandle_t displayUpdate = NULL;
   xTaskCreate(
@@ -921,7 +963,6 @@ void setup() {
   NULL,			/* Parameter passed into the task */
   3,			/* Task priority */
   &sendCan );	/* Pointer to store the task handle */
-  #endif
 
   TaskHandle_t checkHandshake = NULL;
   xTaskCreate(
@@ -932,6 +973,11 @@ void setup() {
   3,			/* Task priority */
   &checkHandshake );	/* Pointer to store the task handle */
   
+  // Create the monitor task
+  xTaskCreate(TaskMonitor, "Monitor", 2000, NULL, 1, NULL);
+
+  #endif
+
   // compute sine values for lookup table
   uint32_t phase = 0;
   while(phase < SINE_RESOLUTION)
@@ -975,13 +1021,12 @@ void setup() {
 
   //Initialise UART
   Serial.begin(9600);
-  Serial.println("Hello World");
 
   // init CAN bus
   CAN_Init(true); // true means it reads it's OWN CAN output
   setCANFilter(0x123,0x7ff);
 
-  #ifndef TEST_SCAN_KEYS
+  #ifndef TESTING
   // bind ISR to CAN RX event
   CAN_RegisterRX_ISR(CAN_RX_ISR);
 
@@ -991,9 +1036,16 @@ void setup() {
 
   CAN_Start();
 
+  #ifndef TESTING
   // start RTOS scheduler
   vTaskStartScheduler();
+  #endif
 
+  #ifdef TESTING
+  test_sampleISR();
+  //test_displayUpdateTask();
+  //test_checkHandshakeTask();
+  #endif
 }
 
 void loop() 

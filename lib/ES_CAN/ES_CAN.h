@@ -1,4 +1,6 @@
 #include <stm32l4xx_hal_cortex.h>
+#ifndef ES_CAN_H
+#define ES_CAN_H
 
 //Initialise the CAN module
 uint32_t CAN_Init(bool loopback=false);
@@ -24,3 +26,5 @@ uint32_t CAN_RegisterRX_ISR(void(& callback)());
 
 //Set up an interrupt on transmitted messages
 uint32_t CAN_RegisterTX_ISR(void(& callback)());
+
+#endif
