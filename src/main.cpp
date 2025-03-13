@@ -10,10 +10,47 @@
 #include <ES_CAN.h>
 #include "main.h"
 #include "test.h"
+#include "analog.h"
 
-#define TESTING
+DAC_HandleTypeDef hdac;
+DMA_HandleTypeDef hdma_dac1;
+TIM_HandleTypeDef htim2;
 
-// #define TEST_SCAN_KEYS
+
+// Interrupt handler for DMA1 channel 3
+void DMA1_Channel3_IRQHandler(void) {
+  if (__HAL_DMA_GET_FLAG(&hdma_dac1, DMA_FLAG_TC3)) {
+      __HAL_DMA_CLEAR_FLAG(&hdma_dac1, DMA_FLAG_TC3);
+      // Handle DMA transfer complete here
+  }
+}
+
+void TIM2_IRQHandler(void) {
+  if (__HAL_TIM_GET_FLAG(&htim2, TIM_FLAG_UPDATE)) {
+      __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
+      // Handle the timer update
+  }
+}
+
+#define NS  128
+
+#define SINE_WAVE_SIZE 256
+
+// Define sine wave lookup table (values for a 12-bit DAC output)
+const uint16_t sine_wave[SINE_WAVE_SIZE] = {
+  2048, 2115, 2182, 2249, 2316, 2383, 2450, 2517, 2583, 2650, 2716, 2782, 2848, 2913, 2978, 3043,
+  3107, 3170, 3233, 3295, 3356, 3417, 3478, 3537, 3596, 3654, 3711, 3768, 3824, 3880, 3935, 3989,
+  4042, 4095, 4147, 4198, 4249, 4299, 4348, 4397, 4445, 4493, 4539, 4585, 4630, 4675, 4719, 4763,
+  4806, 4848, 4889, 4930, 4970, 5009, 5048, 5086, 5123, 5159, 5195, 5230, 5265, 5300, 5333, 5365,
+  5397, 5428, 5458, 5488, 5517, 5545, 5573, 5600, 5626, 5652, 5677, 5701, 5725, 5748, 5770, 5791,
+  5812, 5832, 5851, 5870, 5888, 5905, 5922, 5938, 5954, 5969, 5984, 5998, 6011, 6024, 6036, 6048,
+  6059, 6070, 6080, 6089, 6098, 6107, 6115, 6122, 6129, 6135, 6141, 6146, 6150, 6154, 6157, 6160,
+  6162, 6164, 6166, 6167, 6167, 6167, 6166, 6165, 6163, 6160, 6157, 6154, 6150, 6146, 6142, 6137,
+  6132, 6127, 6121, 6115, 6108, 6101, 6093, 6085, 6077, 6068, 6059, 6049, 6039, 6029, 6018, 6007,
+  5996, 5985, 5973, 5961, 5949, 5937, 5925, 5912, 5900, 5887, 5874, 5861, 5848, 5835, 5822, 5808
+};
+
+// #define TESTING
 
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
@@ -51,6 +88,8 @@
   Knob octaveKnob = Knob(0, 8, 3);
   Knob waveKnob = Knob(0, 2, 0);
   Knob InstrumentKnob = Knob(0, 1, 1);
+
+  uint8_t RX_Message_Temp[8] = {0};
 
   // TODO: what variables should be volatile?
   // stores the current step sizes that should be played
@@ -141,6 +180,11 @@ void receiveCanTask(void * pvParameters)
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
 
     uint8_t action = RX_Message[0];
+
+    // TODO: remove after debugging
+    RX_Message_Temp[0] = RX_Message[0];
+    RX_Message_Temp[1] = RX_Message[1];
+    RX_Message_Temp[2] = RX_Message[2];
     
     // octave change
     if(RX_Message[0] == 'O')
@@ -297,7 +341,6 @@ int readJoystickHoriz()
     return (abs(joystick) < 5) ? 0 : joystick; // apply deadzone
 }
 
-
 // sets speaker voltage 22,000 times per sec
 // TODO: read systate and currentStepSize atomically
 void sampleISR()
@@ -335,8 +378,8 @@ void sampleISR()
       }
 
       // Apply damper effect
-      float newValue = 1.0f - (channelTimes[i] * (1.0f / DAMPER_RESOLUTION));
-      v_delta *= newValue;
+      // float newValue = 1.0f - (channelTimes[i] * (1.0f / DAMPER_RESOLUTION));
+      // v_delta *= newValue;
 
       Vout += v_delta;
     }
@@ -344,9 +387,23 @@ void sampleISR()
     // Apply volume control using logarithmic tapering
     Vout = Vout >> (8 - volumeKnob.getValue());
 
+
     // Ensure Vout stays within 0-255 range for DAC
     Vout = constrain(Vout + 128, 0, 255);
-    analogWrite(OUTR_PIN, Vout);
+
+    // analogWrite(A3, Vout);
+
+    // latestSample = static_cast<uint16_t>(oscillator.generateSample()); // Get new sample
+    uint16_t dac_value = static_cast<uint16_t>(Vout * 16);  // Scale to 12-bit range
+    
+    HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, dac_value);
+
+    // timer->setCaptureCompare(1, Vout, RESOLUTION_8B_COMPARE_FORMAT); // Adjust duty cycle
+
+    // DAC->DHR12R2 = Vout; 
+    // DAC->DHR8R2 = Vout;
+
+    // DAC->DHR12R1 = Vout;  // Update DAC channel 1
 }
 
 // attach/detach sampling ISR
@@ -395,62 +452,64 @@ void checkHandshakeTask(void * pvParameters)
     westDetect = !sysState.inputs[23];
     eastDetect = !sysState.inputs[27];
 
-    // east LOW to HIGH
-    if(lastEast == 0 && eastDetect == 1)
-    {
-      // keyboard plugged into right
-      if(sysState.BOARD_ID != -1)
-      {
-        // turn east off
-        __atomic_store_n(&outBits[6], 0, __ATOMIC_RELAXED);
-        setOutMuxBit(HKOE_BIT, LOW);
+    // // east LOW to HIGH
+    // if(lastEast == 0 && eastDetect == 1)
+    // {
+    //   // // keyboard plugged into right
+    //   // if(sysState.BOARD_ID != -1)
+    //   // {
+    //   //   // turn east off
+    //   //   __atomic_store_n(&outBits[6], 0, __ATOMIC_RELAXED);
+    //   //   setOutMuxBit(HKOE_BIT, LOW);
 
-        // I DONT KNOW WHY I NEED THIS BUT IT BREAKS OTHERWISE :/
-        sysState.handshakePending = true;
-        sysState.ID_RECV = -1;
-        xSemaphoreGive(sysState.mutex);
+    //   //   // break for 1.5 secs to allow east signal to propagate
+    //   //   sysState.handshakePending = true;
+    //   //   sysState.ID_RECV = -1;
+    //   //   xSemaphoreGive(sysState.mutex);
 
-        #ifndef TESTING
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        #endif
+    //   //   #ifndef TESTING
+    //   //   vTaskDelay(pdMS_TO_TICKS(000));
+    //   //   #endif
 
-        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-        sysState.handshakePending = false;
+    //   //   xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    //   //   sysState.handshakePending = false;
 
-        // send the board it's id
-        // TODO: need to get rid of this
-        delay(500);
-        sendID(sysState.BOARD_ID+1);
-      }
-    }
-    // east HIGH to LOW
-    else if(lastEast == 1 && eastDetect == 0)
-    { 
-      // keyboard on right removed
-      // DO NOTHING
-    }
-    // west LOW to HIGH
-    if(lastWest == 0 && westDetect == 1)
-    {
-      // keyboard is plugged into left
-      // DO NOTHING HANDSHAKE HASNT STARTED
-      // OR
-      // signals being reset after after handshake
-      // DO NOTHING
-    }
+    //   //   // send the board it's id
+    //   //   sendID(sysState.BOARD_ID+1);
+    //   // }
+    // }
+    // // east HIGH to LOW
+    // else if(lastEast == 1 && eastDetect == 0)
+    // { 
+    //   // keyboard on right removed
+    //   // DO NOTHING
+    // }
+    // // west LOW to HIGH
+    // if(lastWest == 0 && westDetect == 1)
+    // {
+    //   // keyboard is plugged into left
+    //   // DO NOTHING HANDSHAKE HASNT STARTED
+    //   // OR
+    //   // signals being reset after after handshake
+    //   // DO NOTHING
+    // }
 
     // west HIGH to LOW
     // keyboard on left unplugged
     // OR keyboard on left finished handshake
     // OR startup of the leftmost board
     // this assumes we dont plug a keyboard in when the rest are in handshake mode (cos west would then be low)
-    else if((lastWest == 1 && westDetect == 0) || (lastWest == -1 && westDetect == 0))
+    if((lastWest == 1 && westDetect == 0) || (lastWest == -1 && westDetect == 0))
     {
       // keyboard on left unplugged
       // START HANDSHAKE
       // OR
       // keyboard on left finished handshake
       // START HANDSHAKE
+
+      // turn east off
+      __atomic_store_n(&outBits[6], 0, __ATOMIC_RELAXED);
+      setOutMuxBit(HKOE_BIT, LOW);
 
       // wait for CAN message to be received
       // we yield CPU access so other tasks can run in this time
@@ -461,7 +520,7 @@ void checkHandshakeTask(void * pvParameters)
       //  TODO: how do we characterise this in a test?
       // TODO: could probably remove this (or shorten it) if CAN_RX was a higher priority
       #ifndef TESTING
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      vTaskDelay(pdMS_TO_TICKS(150));
       #endif
 
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);
@@ -478,14 +537,11 @@ void checkHandshakeTask(void * pvParameters)
       
       octaveKnob.setValue(sysState.BOARD_ID);
       sysState.octaveOverride = true;
-
-      // turn east off
-      __atomic_store_n(&outBits[6], 0, __ATOMIC_RELAXED);
-      setOutMuxBit(HKOE_BIT, LOW);
+  
 
       // send board it's new ID
       // TODO: need to get rid of this
-      delay(500);
+      // delay(500);
       sendID(sysState.BOARD_ID+1);
 
       // if you are the rightmost board then finish the handshaking sequence
@@ -497,7 +553,7 @@ void checkHandshakeTask(void * pvParameters)
         }
         
         // send a "end handshake" CAN message
-        sendEndHandshake();
+        // sendEndHandshake();
 
         // in stereo mode both left and right boards receive
         if(sysState.stereo)
@@ -558,8 +614,11 @@ void scanKeysTask(void * pvParameters)
     // ensures we only access the actual variable once per loop
     uint32_t currentStepSize_Local[2*CHANNELS] = {0};
 
-    joystick_vert = readJoystickVert();
-    joystick_horiz = readJoystickHoriz();
+    // joystick_vert = readJoystickVert();
+    // joystick_horiz = readJoystickHoriz();
+
+    joystick_vert = 0;
+    joystick_horiz = 0;
 
     if(joystick_horiz != last_joystick_horiz)
     {
@@ -595,7 +654,7 @@ void scanKeysTask(void * pvParameters)
   
     // read all 32 inputs into sysState.inputs and keyPressedLocal
     int ch = 0;
-    for(int i = 0; i < 8; i++ )
+    for(int i = 0; i < 8; i++)
     {
       setRow(i);
       if(i < 7) { digitalWrite(OUT_PIN, outBits[i]); } // reset MUX bits
@@ -751,7 +810,7 @@ void scanKeysTask(void * pvParameters)
 void displayUpdateTask(void * pvParameters)
 {
   #ifndef TESTING
-  const TickType_t xFrequency = 100/portTICK_PERIOD_MS;
+  const TickType_t xFrequency = 200/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
   #endif
 
@@ -788,7 +847,7 @@ void displayUpdateTask(void * pvParameters)
 
     // Determine the width of the display
     int displayWidth = u8g2.getDisplayWidth();
-
+    
     int textWidth = u8g2.getStrWidth("00"); // RECV and SEND have same width
     u8g2.setCursor(displayWidth - textWidth, 10);
     u8g2.print(sysState.BOARD_ID);
@@ -804,10 +863,11 @@ void displayUpdateTask(void * pvParameters)
     u8g2.print("Wave: ");
     u8g2.print(waveTypes[waveKnob.getValue()]);
 
-    textWidth = u8g2.getStrWidth("Instr: ") + u8g2.getStrWidth(instrumentTypes[InstrumentKnob.getValue()]);
-    u8g2.setCursor(displayWidth - textWidth, 30);
-    u8g2.print("Instr: ");
-    u8g2.print(instrumentTypes[InstrumentKnob.getValue()]);
+    // temporarily removed
+    // textWidth = u8g2.getStrWidth("Instr: ") + u8g2.getStrWidth(instrumentTypes[InstrumentKnob.getValue()]);
+    // u8g2.setCursor(displayWidth - textWidth, 30);
+    // u8g2.print("Instr: ");
+    // u8g2.print(instrumentTypes[InstrumentKnob.getValue()]);
 
     // display volume of current keyboard
     u8g2.setCursor(2,30);
@@ -815,10 +875,10 @@ void displayUpdateTask(void * pvParameters)
     u8g2.print(volumeKnob.getValue());
 
     // display last received CAN message
-    // u8g2.setCursor(63,30);
-    // u8g2.print((char) RX_Message[0]);
-    // u8g2.print(RX_Message[1]);
-    // u8g2.print(RX_Message[2]);
+    u8g2.setCursor(63,30);
+    u8g2.print((char) RX_Message_Temp[0]);
+    u8g2.print(RX_Message_Temp[1]);
+    u8g2.print(RX_Message_Temp[2]);
 
     if(sysState.handshakePending)
     {
@@ -878,7 +938,145 @@ void TaskMonitor(void *pvParameters) {
   }
 }
 
-void setup() {
+
+
+
+#define WAVEFORM_SIZE 32
+volatile uint16_t Waveform_LUT[WAVEFORM_SIZE] = {
+    2048, 2447, 2831, 3185, 3495, 3750, 3939, 4056, 4095, 4056, 3939, 3750, 
+    3495, 3185, 2831, 2447, 2048, 1648, 1264,  910,  600,  345,  156,   39,  
+       0,   39,  156,  345,  600,  910, 1264, 1648
+};
+
+
+void MX_GPIO_Init(void)
+{
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    /* Configure PB7 as Output */
+    GPIO_InitStruct.Pin = GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+}
+
+void MX_DMA_Init(void)
+{
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  // Configure DMA for DAC channel 1.
+  hdma_dac1.Instance = DMA1_Channel3;
+  // hdma_dac1.Init.Request = DMA_REQUEST_1; // This now resolves to DMA_REQUEST_1 if not defined
+  hdma_dac1.Init.Direction = DMA_MEMORY_TO_PERIPH;
+  hdma_dac1.Init.PeriphInc = DMA_PINC_DISABLE;
+  hdma_dac1.Init.MemInc = DMA_MINC_ENABLE;
+  hdma_dac1.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
+  hdma_dac1.Init.MemDataAlignment = DMA_MDATAALIGN_HALFWORD;
+  hdma_dac1.Init.Mode = DMA_CIRCULAR;
+  hdma_dac1.Init.Priority = DMA_PRIORITY_HIGH;
+
+  if (HAL_DMA_Init(&hdma_dac1) != HAL_OK) {
+      Serial.println("DMA initialization error");
+  }
+  // Link the DMA handle to the DAC handle.
+  __HAL_LINKDMA(&hdac, DMA_Handle1, hdma_dac1);
+}
+
+void MX_TIM2_Init(void)
+{
+    /* Enable TIM2 Clock */
+    __HAL_RCC_TIM7_CLK_ENABLE();
+
+    /* Configure TIM2 for DAC trigger */
+    htim2.Instance = TIM2;
+    htim2.Init.Prescaler = 0;  // 1 MHz tick
+    htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim2.Init.Period = 70;  // Adjust for waveform frequency
+    htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+
+    if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    /* Configure TIM2 to trigger DAC */
+    TIM_MasterConfigTypeDef sMasterConfig = {0};
+    sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+    sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+
+    if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+    {
+        Error_Handler();
+    }
+}
+
+void MX_DAC_Init(void)
+{
+    /* Enable DAC Clock */
+    __HAL_RCC_DAC1_CLK_ENABLE();
+
+    /* Configure DAC */
+    hdac.Instance = DAC;
+    if (HAL_DAC_Init(&hdac) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    /* Configure DAC Channel 1 */
+    DAC_ChannelConfTypeDef sConfig = {0};
+    sConfig.DAC_Trigger = DAC_TRIGGER_T2_TRGO;
+    sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+
+    if (HAL_DAC_ConfigChannel(&hdac, &sConfig, DAC_CHANNEL_1) != HAL_OK)
+    {
+        Error_Handler();
+    }
+}
+
+// #define NS  128
+
+// uint16_t Wave_LUT[NS] = {
+//     2048, 2149, 2250, 2350, 2450, 2549, 2646, 2742, 2837, 2929, 3020, 3108, 3193, 3275, 3355,
+//     3431, 3504, 3574, 3639, 3701, 3759, 3812, 3861, 3906, 3946, 3982, 4013, 4039, 4060, 4076,
+//     4087, 4094, 4095, 4091, 4082, 4069, 4050, 4026, 3998, 3965, 3927, 3884, 3837, 3786, 3730,
+//     3671, 3607, 3539, 3468, 3394, 3316, 3235, 3151, 3064, 2975, 2883, 2790, 2695, 2598, 2500,
+//     2400, 2300, 2199, 2098, 1997, 1896, 1795, 1695, 1595, 1497, 1400, 1305, 1212, 1120, 1031,
+//     944, 860, 779, 701, 627, 556, 488, 424, 365, 309, 258, 211, 168, 130, 97,
+//     69, 45, 26, 13, 4, 0, 1, 8, 19, 35, 56, 82, 113, 149, 189,
+//     234, 283, 336, 394, 456, 521, 591, 664, 740, 820, 902, 987, 1075, 1166, 1258,
+//     1353, 1449, 1546, 1645, 1745, 1845, 1946, 2047
+// };
+
+void setup()
+{
+  Serial.begin(9600);
+  pinMode(LED_BUILTIN, OUTPUT);
+  
+  HAL_Init();
+
+ // init();
+
+ // MX_GPIO_Init();
+  // MX_DMA_Init();
+  MX_DAC_Init();
+  MX_TIM2_Init();
+  
+  // Enable Timer interrupt (TIM7)
+  HAL_NVIC_SetPriority(TIM2_IRQn, 0, 1);
+  HAL_NVIC_EnableIRQ(TIM2_IRQn);
+
+  HAL_TIM_Base_Start(&htim2);
+  HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
+
+  // HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)Wave_LUT, NS, DAC_ALIGN_12B_R);
+
+  // HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 0);  // Set interrupt priority
+  // HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
+
+
   // compute step sizes from key frequencies
   for (int i = 0; i < 12; ++i) {
     stepSizes[i] = (uint32_t)(4294967296.0 * keyFreqs[i] / 22000.0);
@@ -994,15 +1192,13 @@ void setup() {
   setOutMuxBit(HKOE_BIT, HIGH);
 
   // allows east/west signals to stabilise before they are read (IMPORTANT)
-  delay(1000);
-  
-  // toggleSampleISR(true);
+  delay(100);
 
   //Initialise UART
   Serial.begin(9600);
 
   // init CAN bus
-  CAN_Init(true); // true means it reads it's OWN CAN output
+  CAN_Init(false); // true means it reads it's OWN CAN output
   setCANFilter(0x123,0x7ff);
 
   #ifndef TESTING
