@@ -15,7 +15,7 @@
 DAC_HandleTypeDef hdac;
 DMA_HandleTypeDef hdma_dac1;
 TIM_HandleTypeDef htim2;
-
+ADC_HandleTypeDef hadc1;
 
 // Interrupt handler for DMA1 channel 3
 void DMA1_Channel3_IRQHandler(void) {
@@ -50,7 +50,7 @@ const uint16_t sine_wave[SINE_WAVE_SIZE] = {
   5996, 5985, 5973, 5961, 5949, 5937, 5925, 5912, 5900, 5887, 5874, 5861, 5848, 5835, 5822, 5808
 };
 
-// #define TESTING
+#define TESTING
 
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
@@ -324,23 +324,6 @@ void sendStereoBalance(int stereoBalance)
   xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
 }
 
-// reads the vertical joystick component [-100, 100]
-int readJoystickVert()
-{
-  // top is 777 bottom is 177
-  int joystick = constrain(analogRead(JOYY_PIN), 177, 777);
-  joystick = (-joystick + 477) / 3;
-  return (abs(joystick) < 5) ? 0 : joystick; // apply deadzone
-}
-
-// reads the horizontal joystick component [-100, 100]
-int readJoystickHoriz()
-{
-    int joystick = constrain(analogRead(JOYX_PIN), 128, 929);
-    joystick = (-joystick + 528.5) / 4.005;
-    return (abs(joystick) < 5) ? 0 : joystick; // apply deadzone
-}
-
 // sets speaker voltage 22,000 times per sec
 // TODO: read systate and currentStepSize atomically
 void sampleISR()
@@ -378,8 +361,8 @@ void sampleISR()
       }
 
       // Apply damper effect
-      // float newValue = 1.0f - (channelTimes[i] * (1.0f / DAMPER_RESOLUTION));
-      // v_delta *= newValue;
+      float newValue = 1.0f - (channelTimes[i] * (1.0f / DAMPER_RESOLUTION));
+      v_delta *= newValue;
 
       Vout += v_delta;
     }
@@ -583,6 +566,27 @@ void checkHandshakeTask(void * pvParameters)
   }
 }
 
+// -100 to 100 for each
+void readJoystick(int* horiz, int* vert)
+{  
+  // taskENTER_CRITICAL();
+
+  // Start ADC conversion for horizontal (X) axis
+  HAL_ADC_Start(&hadc1);
+  int x_axis = HAL_ADC_GetValue(&hadc1); // right 500 left 3650
+  int y_axis = HAL_ADC_GetValue(&hadc1); // 510 top 3510 bottom
+  HAL_ADC_Stop(&hadc1); // 
+
+  // TODO: add deadzone to both axes
+  y_axis = constrain(y_axis, 510, 3510);
+  *vert = map(y_axis, 510, 3510, 100, -100);
+
+  x_axis = constrain(x_axis, 50, 3650);
+  *horiz = map(x_axis, 50, 3650, 100, -100);
+
+  // taskEXIT_CRITICAL();
+}
+
 // task to check keys pressed runs every 20ms
 void scanKeysTask(void * pvParameters)
 {
@@ -607,18 +611,14 @@ void scanKeysTask(void * pvParameters)
     // ensures we sample keyboard only every 50ms
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
     #endif
-
+    
     // take systate mutex
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
 
     // ensures we only access the actual variable once per loop
     uint32_t currentStepSize_Local[2*CHANNELS] = {0};
 
-    // joystick_vert = readJoystickVert();
-    // joystick_horiz = readJoystickHoriz();
-
-    joystick_vert = 0;
-    joystick_horiz = 0;
+    readJoystick(&joystick_horiz, &joystick_vert);
 
     if(joystick_horiz != last_joystick_horiz)
     {
@@ -938,16 +938,12 @@ void TaskMonitor(void *pvParameters) {
   }
 }
 
-
-
-
 #define WAVEFORM_SIZE 32
 volatile uint16_t Waveform_LUT[WAVEFORM_SIZE] = {
     2048, 2447, 2831, 3185, 3495, 3750, 3939, 4056, 4095, 4056, 3939, 3750, 
     3495, 3185, 2831, 2447, 2048, 1648, 1264,  910,  600,  345,  156,   39,  
        0,   39,  156,  345,  600,  910, 1264, 1648
 };
-
 
 void MX_GPIO_Init(void)
 {
@@ -1036,6 +1032,86 @@ void MX_DAC_Init(void)
     }
 }
 
+void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Common config
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc1.Init.LowPowerAutoWait = DISABLE;
+  hadc1.Init.ContinuousConvMode = ENABLE;
+  hadc1.Init.NbrOfConversion = 2;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
+  hadc1.Init.OversamplingMode = DISABLE;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_5;
+  sConfig.Rank = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
+  sConfig.SingleDiff = ADC_SINGLE_ENDED;
+  sConfig.OffsetNumber = ADC_OFFSET_NONE;
+  sConfig.Offset = 0;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_6;
+  sConfig.Rank = ADC_REGULAR_RANK_2;
+  sConfig.SamplingTime = ADC_SAMPLETIME_2CYCLES_5;
+  sConfig.SingleDiff = ADC_SINGLE_ENDED;
+  sConfig.OffsetNumber = ADC_OFFSET_NONE;
+  sConfig.Offset = 0;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
+}
+
+// uint32_t Read_ADC(uint32_t channel) {
+//   ADC_ChannelConfTypeDef sConfig = {0};
+//   sConfig.Channel = channel;
+//   sConfig.Rank = ADC_REGULAR_RANK_1;
+//   sConfig.SamplingTime = ADC_SAMPLETIME_12CYCLES_5;
+
+//   HAL_ADC_ConfigChannel(&hadc1, &sConfig);
+//   HAL_ADC_Start(&hadc1);
+//   HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
+//   uint32_t value = HAL_ADC_GetValue(&hadc1);
+//   HAL_ADC_Stop(&hadc1);
+//   return value;
+// }
+
 // #define NS  128
 
 // uint16_t Wave_LUT[NS] = {
@@ -1059,10 +1135,11 @@ void setup()
 
  // init();
 
- // MX_GPIO_Init();
+  //MX_GPIO_Init();
   // MX_DMA_Init();
   MX_DAC_Init();
   MX_TIM2_Init();
+  MX_ADC1_Init();
   
   // Enable Timer interrupt (TIM7)
   HAL_NVIC_SetPriority(TIM2_IRQn, 0, 1);
@@ -1070,6 +1147,34 @@ void setup()
 
   HAL_TIM_Base_Start(&htim2);
   HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
+
+  /* Convert the Channel */
+
+  int joystick_horiz = 0;
+  int joystick_vert = 0;
+
+  // while(1)
+  // {
+  //   readJoystick(&joystick_horiz, &joystick_vert);
+  //   Serial.println(joystick_horiz); 
+  // }
+  // while(1)
+  // {
+  //   readJoystick(&joystick_horiz, &joystick_vert);
+
+  //   Serial.println(joystick_horiz);
+  // }
+  
+
+  // // Start the conversion for both channels
+  // if (HAL_ADC_Start(&hadc1) != HAL_OK)
+  // {
+  //   Serial.println("ADC START SUCCESS!");
+  // }
+  // else
+  // {
+  //   Serial.println("ADC START FAIL!");
+  // }
 
   // HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)Wave_LUT, NS, DAC_ALIGN_12B_R);
 
@@ -1105,7 +1210,7 @@ void setup()
   xTaskCreate(
   scanKeysTask,		/* Function that implements the task */
   "scanKeys",		/* Text name for the task */
-  256,      		/* Stack size in words, not bytes */
+  512,      		/* Stack size in words, not bytes */
   NULL,			/* Parameter passed into the task */
   2,			/* Task priority */
   &scanKeysHandle );	/* Pointer to store the task handle */
@@ -1177,8 +1282,10 @@ void setup()
   pinMode(C1_PIN, INPUT);
   pinMode(C2_PIN, INPUT);
   pinMode(C3_PIN, INPUT);
-  pinMode(JOYX_PIN, INPUT);
-  pinMode(JOYY_PIN, INPUT);
+
+  // disable because we use ADC
+  // pinMode(JOYX_PIN, INPUT);
+  // pinMode(JOYY_PIN, INPUT);
 
   //Initialise display
   setOutMuxBit(DRST_BIT, LOW);  //Assert display logic reset
@@ -1195,7 +1302,7 @@ void setup()
   delay(100);
 
   //Initialise UART
-  Serial.begin(9600);
+  // Serial.begin(9600);
 
   // init CAN bus
   CAN_Init(false); // true means it reads it's OWN CAN output
@@ -1211,6 +1318,8 @@ void setup()
 
   CAN_Start();
 
+
+
   #ifndef TESTING
   // start RTOS scheduler
   vTaskStartScheduler();
@@ -1220,7 +1329,7 @@ void setup()
   test_sampleISR();
   test_receiveCanTask();
   test_displayUpdateTask();
-  test_sendCanTask();
+  // test_sendCanTask();
   test_scanKeysTask();
   //test_checkHandshakeTask();
   #endif
