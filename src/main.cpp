@@ -18,19 +18,15 @@ TIM_HandleTypeDef htim2;
 ADC_HandleTypeDef hadc1;
 
 // Interrupt handler for DMA1 channel 3
-void DMA1_Channel3_IRQHandler(void) {
-  if (__HAL_DMA_GET_FLAG(&hdma_dac1, DMA_FLAG_TC3)) {
-      __HAL_DMA_CLEAR_FLAG(&hdma_dac1, DMA_FLAG_TC3);
-      // Handle DMA transfer complete here
-  }
+extern "C" void DMA1_Channel3_IRQHandler(void) {
+  HAL_DMA_IRQHandler(&hdma_dac1);
 }
 
-void TIM2_IRQHandler(void) {
-  if (__HAL_TIM_GET_FLAG(&htim2, TIM_FLAG_UPDATE)) {
-      __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
-      // Handle the timer update
-  }
-}
+// extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+//   if (htim->Instance == TIM2) {  // Check if it's TIM2
+//       Serial.println("TIM2 event triggered!");
+//   }
+// }
 
 #define NS  128
 
@@ -50,7 +46,7 @@ const uint16_t sine_wave[SINE_WAVE_SIZE] = {
   5996, 5985, 5973, 5961, 5949, 5937, 5925, 5912, 5900, 5887, 5874, 5861, 5848, 5835, 5822, 5808
 };
 
-#define TESTING
+//#define TESTING
 
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
@@ -112,7 +108,7 @@ const uint16_t sine_wave[SINE_WAVE_SIZE] = {
   // stores the step sizes corresponding with each key at octave 0
   uint32_t stepSizes[12];
 
-  // stores sine wave with SINE_RESOLUTION x-values with amplitude 127 to -127
+  // stores sine wave with SINE_RESOLUTION x-values with amplitude -2048 to 2048
   const int SINE_RESOLUTION_BITS = 8;
   const int SINE_RESOLUTION = 1 << SINE_RESOLUTION_BITS;  // 2^SINE_RESOLUTION_BITS
 
@@ -329,7 +325,7 @@ void sendStereoBalance(int stereoBalance)
 void sampleISR()
 {
     static uint32_t phaseAcc[CHANNELS * 2] = {0};
-    int32_t Vout = 0;
+    int16_t Vout = 0;
     int waveType = waveKnob.getValue();
 
     // play drum overlay
@@ -343,12 +339,12 @@ void sampleISR()
       if (currentStepSize[i] == 0) { continue; };
 
       phaseAcc[i] += currentStepSize[i];
-      int32_t v_delta = 0;
+      int16_t v_delta = 0;
 
       // Generate waveform based on waveType
       if (waveType == 0) // Sawtooth Wave
       {
-          v_delta = (phaseAcc[i] >> 24) - 128;
+          v_delta = (phaseAcc[i] >> 20) - 2048;
       }
       else if (waveType == 1) // Sine Wave
       {
@@ -357,7 +353,7 @@ void sampleISR()
       }
       else if (waveType == 2) // Square Wave
       {
-          v_delta = (phaseAcc[i] > (1 << 31)) ? 127 : -128;
+          v_delta = (phaseAcc[i] > (1 << 31)) ? 2047 : -2048;
       }
 
       // Apply damper effect
@@ -370,23 +366,11 @@ void sampleISR()
     // Apply volume control using logarithmic tapering
     Vout = Vout >> (8 - volumeKnob.getValue());
 
-
-    // Ensure Vout stays within 0-255 range for DAC
-    Vout = constrain(Vout + 128, 0, 255);
-
-    // analogWrite(A3, Vout);
-
-    // latestSample = static_cast<uint16_t>(oscillator.generateSample()); // Get new sample
-    uint16_t dac_value = static_cast<uint16_t>(Vout * 16);  // Scale to 12-bit range
+    // Ensure Vout stays within 0-4095 range for 12-bit DAC
+    Vout = constrain(Vout + 2048, 0, 4095);
     
-    HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, dac_value);
-
-    // timer->setCaptureCompare(1, Vout, RESOLUTION_8B_COMPARE_FORMAT); // Adjust duty cycle
-
-    // DAC->DHR12R2 = Vout; 
-    // DAC->DHR8R2 = Vout;
-
-    // DAC->DHR12R1 = Vout;  // Update DAC channel 1
+    // write DAC
+    HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, Vout);
 }
 
 // attach/detach sampling ISR
@@ -575,12 +559,13 @@ void readJoystick(int* horiz, int* vert)
   HAL_ADC_Start(&hadc1);
   int x_axis = HAL_ADC_GetValue(&hadc1); // right 500 left 3650
   int y_axis = HAL_ADC_GetValue(&hadc1); // 510 top 3510 bottom
-  HAL_ADC_Stop(&hadc1); // 
+  HAL_ADC_Stop(&hadc1);
 
-  // TODO: add deadzone to both axes
-  y_axis = constrain(y_axis, 510, 3510);
-  *vert = map(y_axis, 510, 3510, 100, -100);
+  y_axis = constrain(y_axis, 410, 3510);
+  *vert = map(y_axis, 410, 3510, 100, -100);
+  if(*vert < 10 && *vert > -10){ *vert = 0; }
 
+  // TODO: add deadzone to x axis
   x_axis = constrain(x_axis, 50, 3650);
   *horiz = map(x_axis, 50, 3650, 100, -100);
 
@@ -619,6 +604,7 @@ void scanKeysTask(void * pvParameters)
     uint32_t currentStepSize_Local[2*CHANNELS] = {0};
 
     readJoystick(&joystick_horiz, &joystick_vert);
+    Serial.println(joystick_vert);
 
     if(joystick_horiz != last_joystick_horiz)
     {
@@ -973,9 +959,8 @@ void MX_DMA_Init(void)
   hdma_dac1.Init.Mode = DMA_CIRCULAR;
   hdma_dac1.Init.Priority = DMA_PRIORITY_HIGH;
 
-  if (HAL_DMA_Init(&hdma_dac1) != HAL_OK) {
-      Serial.println("DMA initialization error");
-  }
+  HAL_DMA_Init(&hdma_dac1);
+
   // Link the DMA handle to the DAC handle.
   __HAL_LINKDMA(&hdac, DMA_Handle1, hdma_dac1);
 }
@@ -983,13 +968,13 @@ void MX_DMA_Init(void)
 void MX_TIM2_Init(void)
 {
     /* Enable TIM2 Clock */
-    __HAL_RCC_TIM7_CLK_ENABLE();
+    __HAL_RCC_TIM2_CLK_ENABLE();
 
     /* Configure TIM2 for DAC trigger */
     htim2.Instance = TIM2;
     htim2.Init.Prescaler = 0;  // 1 MHz tick
     htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim2.Init.Period = 70;  // Adjust for waveform frequency
+    htim2.Init.Period = 100;  // Adjust for waveform frequency
     htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
     htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
 
@@ -1112,19 +1097,26 @@ void MX_ADC1_Init(void)
 //   return value;
 // }
 
-// #define NS  128
+#define NS  128
 
-// uint16_t Wave_LUT[NS] = {
-//     2048, 2149, 2250, 2350, 2450, 2549, 2646, 2742, 2837, 2929, 3020, 3108, 3193, 3275, 3355,
-//     3431, 3504, 3574, 3639, 3701, 3759, 3812, 3861, 3906, 3946, 3982, 4013, 4039, 4060, 4076,
-//     4087, 4094, 4095, 4091, 4082, 4069, 4050, 4026, 3998, 3965, 3927, 3884, 3837, 3786, 3730,
-//     3671, 3607, 3539, 3468, 3394, 3316, 3235, 3151, 3064, 2975, 2883, 2790, 2695, 2598, 2500,
-//     2400, 2300, 2199, 2098, 1997, 1896, 1795, 1695, 1595, 1497, 1400, 1305, 1212, 1120, 1031,
-//     944, 860, 779, 701, 627, 556, 488, 424, 365, 309, 258, 211, 168, 130, 97,
-//     69, 45, 26, 13, 4, 0, 1, 8, 19, 35, 56, 82, 113, 149, 189,
-//     234, 283, 336, 394, 456, 521, 591, 664, 740, 820, 902, 987, 1075, 1166, 1258,
-//     1353, 1449, 1546, 1645, 1745, 1845, 1946, 2047
-// };
+uint16_t Wave_LUT[NS] = {
+    2048, 2149, 2250, 2350, 2450, 2549, 2646, 2742, 2837, 2929, 3020, 3108, 3193, 3275, 3355,
+    3431, 3504, 3574, 3639, 3701, 3759, 3812, 3861, 3906, 3946, 3982, 4013, 4039, 4060, 4076,
+    4087, 4094, 4095, 4091, 4082, 4069, 4050, 4026, 3998, 3965, 3927, 3884, 3837, 3786, 3730,
+    3671, 3607, 3539, 3468, 3394, 3316, 3235, 3151, 3064, 2975, 2883, 2790, 2695, 2598, 2500,
+    2400, 2300, 2199, 2098, 1997, 1896, 1795, 1695, 1595, 1497, 1400, 1305, 1212, 1120, 1031,
+    944, 860, 779, 701, 627, 556, 488, 424, 365, 309, 258, 211, 168, 130, 97,
+    69, 45, 26, 13, 4, 0, 1, 8, 19, 35, 56, 82, 113, 149, 189,
+    234, 283, 336, 394, 456, 521, 591, 664, 740, 820, 902, 987, 1075, 1166, 1258,
+    1353, 1449, 1546, 1645, 1745, 1845, 1946, 2047
+};
+
+// extern "C" void TIM2_IRQHandler(void) {
+//   if (__HAL_TIM_GET_FLAG(&htim2, TIM_FLAG_UPDATE) != RESET) {
+//       __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
+//       Serial.println("TIM2 event triggered!\n");
+//   }
+// }
 
 void setup()
 {
@@ -1136,7 +1128,7 @@ void setup()
  // init();
 
   //MX_GPIO_Init();
-  // MX_DMA_Init();
+  MX_DMA_Init();
   MX_DAC_Init();
   MX_TIM2_Init();
   MX_ADC1_Init();
@@ -1146,40 +1138,36 @@ void setup()
   HAL_NVIC_EnableIRQ(TIM2_IRQn);
 
   HAL_TIM_Base_Start(&htim2);
+  TIM2->EGR |= TIM_EGR_UG;
+
   HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
-
-  /* Convert the Channel */
-
-  int joystick_horiz = 0;
-  int joystick_vert = 0;
-
-  // while(1)
-  // {
-  //   readJoystick(&joystick_horiz, &joystick_vert);
-  //   Serial.println(joystick_horiz); 
-  // }
-  // while(1)
-  // {
-  //   readJoystick(&joystick_horiz, &joystick_vert);
-
-  //   Serial.println(joystick_horiz);
-  // }
-  
-
-  // // Start the conversion for both channels
-  // if (HAL_ADC_Start(&hadc1) != HAL_OK)
-  // {
-  //   Serial.println("ADC START SUCCESS!");
-  // }
-  // else
-  // {
-  //   Serial.println("ADC START FAIL!");
-  // }
-
-  // HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)Wave_LUT, NS, DAC_ALIGN_12B_R);
 
   // HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 0);  // Set interrupt priority
   // HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
+
+  // HAL_StatusTypeDef status = HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)Wave_LUT, NS, DAC_ALIGN_12B_R);
+  // if (status != HAL_OK)
+  // {
+  //   Serial.println("DMA Init Failed!");
+  // }
+  // else
+  // {
+  //   Serial.println("DMA Init Success!");
+  // }
+
+
+
+  // while (1)
+  // {
+  //     // for (int i = 0; i < NS; i++) 
+  //     // {
+  //     //     HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, Wave_LUT[i]);
+          
+  //     // }
+
+  //     // Serial.println(HAL_DAC_GetValue(&hdac, DAC_CHANNEL_1));
+  //     // delay(10);
+  // }
 
 
   // compute step sizes from key frequencies
@@ -1264,7 +1252,7 @@ void setup()
   uint32_t phase = 0;
   while(phase < SINE_RESOLUTION)
   {
-    sineLookup[phase] = std::round(127 * std::sin((2*M_PI*phase)/SINE_RESOLUTION));
+    sineLookup[phase] = std::round(2048 * std::sin((2*M_PI*phase)/SINE_RESOLUTION));
     phase++;
   }
 
