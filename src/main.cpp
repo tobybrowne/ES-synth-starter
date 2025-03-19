@@ -46,7 +46,7 @@ const uint16_t sine_wave[SINE_WAVE_SIZE] = {
   5996, 5985, 5973, 5961, 5949, 5937, 5925, 5912, 5900, 5887, 5874, 5861, 5848, 5835, 5822, 5808
 };
 
-const int SAMPLE_BUFFER_SIZE = 128;
+const int SAMPLE_BUFFER_SIZE = 256;
 uint8_t sampleBuffer0[SAMPLE_BUFFER_SIZE/2];
 uint8_t sampleBuffer1[SAMPLE_BUFFER_SIZE/2];
 volatile bool writeBuffer1 = false;
@@ -393,12 +393,10 @@ void sampleISR()
   if (writeBuffer1)
   {
     HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, sampleBuffer0[readCtr++]);
-    // Serial.println(sampleBuffer0[readCtr++]);
   }
   else
   {
     HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, sampleBuffer1[readCtr++]);
-    // Serial.println(sampleBuffer1[readCtr++]);
   }
 }
 
@@ -633,6 +631,9 @@ void scanKeysTask(void * pvParameters)
     uint32_t currentStepSize_Local[2*CHANNELS] = {0};
 
     readJoystick(&joystick_horiz, &joystick_vert);
+    // TODO: needs bigger deadzone
+    joystick_horiz = 0;
+    joystick_vert = 0;
 
     if(joystick_horiz != last_joystick_horiz)
     {
@@ -952,37 +953,105 @@ void TaskMonitor(void *pvParameters) {
   }
 }
 
+// need to test different parameters for this
+// piano? / strings / guitar / drums
+float attackTime = 20;    
+float decayTime = 20;     
+float sustainLevel = 22; 
+float releaseTime = 30;   
+
+float applyADSR(int i) {
+  unsigned long currentTime = channelTimes[i];  
+  float envelope = 0;
+  // if pressed, assign ADSR state 
+  if (sysState.keyPressed[i] != 0xFFFF) {  // If the key is pressed
+      // attack: increase amp gradually 
+      if (currentTime < attackTime) {
+           envelope = (float)currentTime / attackTime;  
+      }
+      // decay: decrease to sustain amp
+      else if (currentTime < attackTime + decayTime) {
+          float decayProgress = (float)(currentTime - attackTime) / decayTime;
+          envelope = 1 - (1 - sustainLevel) * decayProgress;  
+      }
+      // sustain 
+      else {
+          envelope = sustainLevel;
+      }
+  } else { 
+      // release: smooth out after release 
+      if (currentTime < releaseTime) {
+          envelope = sustainLevel - (sustainLevel * (float)(currentTime) / releaseTime);  
+      } 
+      // else {
+      //     envelope = 0; 
+      // }
+  }
+
+  // Ensure envelope stays within bounds (0 to 1)
+  return constrain(envelope, 0, 1);
+}
+
 // auto writes when buffer is available
 void genBufferTask(void *pvParameters)
 {
   // only 1 channel
-  static uint32_t phaseAcc = 0;
-  static uint16_t Vout = 0; //Calculate one sample
+  uint32_t phaseAcc[CHANNELS * 2] = {0};
+  uint16_t Vout = 0; //Calculate one sample
+  uint16_t v_delta = 0;
 
   while(1)
   {
     xSemaphoreTake(sampleBufferSemaphore, portMAX_DELAY);
     for (uint32_t writeCtr = 0; writeCtr < SAMPLE_BUFFER_SIZE/2; writeCtr++)
     {
-      // TODO: gen a signal here
+      v_delta = 0;
+      Vout = 0;
+
+      int waveType = waveKnob.getValue();
       
+      // loop through internal channels
+      for (int i = 0; i < 2*CHANNELS; i++)
+      {
+        if (currentStepSize[i] == 0) { continue; };
 
-      // int angle = (phaseAcc >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
-      // Vout = sineLookup[angle];
+        phaseAcc[i] += currentStepSize[i];
 
-      Vout = (phaseAcc >> 20) - 2048;
+        // Generate waveform based on waveType
+        if (waveType == 0) // Sawtooth Wave
+        {
+          v_delta = (phaseAcc[i] >> 20) - 2048;
+        }
+        else if (waveType == 1) // Sine Wave
+        {
+          int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
+          v_delta = sineLookup[angle];
+        }
+        else if (waveType == 2) // Square Wave
+        {
+          v_delta = (phaseAcc[i] > (1 << 31)) ? 2047 : -2048;
+        }
+
+        // // Apply damper effect
+        // float newValue = 1.0f - (channelTimes[i] * (1.0f / DAMPER_RESOLUTION));
+        // v_delta *= newValue;
+
+        Vout += v_delta * applyADSR(i);
+      }
+
+      // Apply volume control using logarithmic tapering
+      // Vout = Vout >> (8 - volumeKnob.getValue());
+
+      Vout = constrain(Vout + 2048, 0, 4095);
 
       if (writeBuffer1)
       {
-        sampleBuffer1[writeCtr] = Vout + 2048;
+        sampleBuffer1[writeCtr] = Vout;
       }
-        
       else
       {
-        sampleBuffer0[writeCtr] = Vout + 2048;
+        sampleBuffer0[writeCtr] = Vout;
       } 
-      
-      phaseAcc+=currentStepSize[0];
     }
   }
 }
@@ -1288,7 +1357,7 @@ void setup()
   "genBuffer",		/* Text name for the task */
   256,      		/* Stack size in words, not bytes */
   NULL,			/* Parameter passed into the task */
-  3,			/* Task priority */
+  1,			/* Task priority */
   &genBuffer );	/* Pointer to store the task handle */
   
   // Create the monitor task
