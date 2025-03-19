@@ -5,7 +5,7 @@
 #include <STM32FreeRTOS.h>
 
 // how many keys can be pressed together
-const int CHANNELS = 4;
+const int CHANNELS = 3;
 
 // stores device state
 struct SysState
@@ -15,8 +15,11 @@ struct SysState
     bool sender = false;
     bool handshakePending = false;
 
-    bool reverb = true;
+    bool reverb = false;
     bool stereo = false;
+    int octave = 0;
+    int volume = 0;
+    int waveType = 0;
 
     bool rightBoard = false;
     int BOARD_ID;

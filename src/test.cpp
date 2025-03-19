@@ -73,6 +73,33 @@ void test_sampleISR()
     Serial.print(" us\n");
 }
 
+// code to benchmark sampleISR
+void test_genBufferTask()
+{
+    // init worst possible test case here...
+    
+    // aims to remove any optimisations that occur from 0 values
+    for(int i = 0; i < 2*CHANNELS; i++)
+    {
+        currentStepSize[i] = stepSizes[0]; // every channel is playing a C note
+        channelTimes[i] = 10; // midway through it's press
+    }
+
+    // benchmark
+    uint32_t startTime = micros();
+    for (int iter = 0; iter < 32; iter++)
+    {
+      // xSemaphoreGive(sampleBufferSemaphore);
+      genBufferTask(NULL);
+    }
+
+    uint32_t endTime = micros();
+    Serial.println("======== genBufferTask test ========");
+    Serial.print("Time: ");
+    Serial.print((endTime-startTime)/32);
+    Serial.print(" us\n");
+}
+
 void test_receiveCanTask()
 {
   // init worst possible test case here...

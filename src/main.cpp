@@ -28,31 +28,13 @@ extern "C" void DMA1_Channel3_IRQHandler(void) {
 //   }
 // }
 
-#define NS  128
-
-#define SINE_WAVE_SIZE 256
-
-// Define sine wave lookup table (values for a 12-bit DAC output)
-const uint16_t sine_wave[SINE_WAVE_SIZE] = {
-  2048, 2115, 2182, 2249, 2316, 2383, 2450, 2517, 2583, 2650, 2716, 2782, 2848, 2913, 2978, 3043,
-  3107, 3170, 3233, 3295, 3356, 3417, 3478, 3537, 3596, 3654, 3711, 3768, 3824, 3880, 3935, 3989,
-  4042, 4095, 4147, 4198, 4249, 4299, 4348, 4397, 4445, 4493, 4539, 4585, 4630, 4675, 4719, 4763,
-  4806, 4848, 4889, 4930, 4970, 5009, 5048, 5086, 5123, 5159, 5195, 5230, 5265, 5300, 5333, 5365,
-  5397, 5428, 5458, 5488, 5517, 5545, 5573, 5600, 5626, 5652, 5677, 5701, 5725, 5748, 5770, 5791,
-  5812, 5832, 5851, 5870, 5888, 5905, 5922, 5938, 5954, 5969, 5984, 5998, 6011, 6024, 6036, 6048,
-  6059, 6070, 6080, 6089, 6098, 6107, 6115, 6122, 6129, 6135, 6141, 6146, 6150, 6154, 6157, 6160,
-  6162, 6164, 6166, 6167, 6167, 6167, 6166, 6165, 6163, 6160, 6157, 6154, 6150, 6146, 6142, 6137,
-  6132, 6127, 6121, 6115, 6108, 6101, 6093, 6085, 6077, 6068, 6059, 6049, 6039, 6029, 6018, 6007,
-  5996, 5985, 5973, 5961, 5949, 5937, 5925, 5912, 5900, 5887, 5874, 5861, 5848, 5835, 5822, 5808
-};
-
-const int SAMPLE_BUFFER_SIZE = 256;
+const int SAMPLE_BUFFER_SIZE = 512;
 uint8_t sampleBuffer0[SAMPLE_BUFFER_SIZE/2];
 uint8_t sampleBuffer1[SAMPLE_BUFFER_SIZE/2];
 volatile bool writeBuffer1 = false;
 SemaphoreHandle_t sampleBufferSemaphore; 
 
-//#define TESTING
+// #define TESTING
 
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
@@ -86,9 +68,9 @@ SemaphoreHandle_t sampleBufferSemaphore;
   SysState sysState;
 
   // knob inits
-  Knob volumeKnob = Knob(0, 8, 5);
+  Knob knob4 = Knob(0, 12, 5); // volume
   Knob octaveKnob = Knob(0, 8, 3);
-  Knob waveKnob = Knob(0, 2, 0);
+  Knob knob2 = Knob(0, 2, 0);
   Knob InstrumentKnob = Knob(0, 1, 1);
 
   uint8_t RX_Message_Temp[8] = {0};
@@ -115,7 +97,7 @@ SemaphoreHandle_t sampleBufferSemaphore;
   uint32_t stepSizes[12];
 
   // stores sine wave with SINE_RESOLUTION x-values with amplitude -2048 to 2048
-  const int SINE_RESOLUTION_BITS = 8;
+  const int SINE_RESOLUTION_BITS = 10;
   const int SINE_RESOLUTION = 1 << SINE_RESOLUTION_BITS;  // 2^SINE_RESOLUTION_BITS
 
   int sineLookup[SINE_RESOLUTION]; // populated in setup, only read from SampleISR
@@ -207,11 +189,11 @@ void receiveCanTask(void * pvParameters)
       // only the right board will receive this but we provide for completeness...
       if(sysState.BOARD_ID == 0) 
       {
-        volumeKnob.setValue(leftVolume);
+        sysState.volume = leftVolume;
       }
       else if(sysState.rightBoard)
       {
-        volumeKnob.setValue(rightVolume);
+        sysState.volume = rightVolume;
       }
     }
 
@@ -650,7 +632,7 @@ void scanKeysTask(void * pvParameters)
 
         int leftVolume = 8 - (stereoBalance / 2);
 
-        volumeKnob.setValue(leftVolume);
+        sysState.volume = leftVolume;
       }
       last_joystick_horiz = joystick_horiz;
     }
@@ -767,12 +749,18 @@ void scanKeysTask(void * pvParameters)
 
     // check knob rotation
     octaveKnob.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
-    waveKnob.updateQuadInputs(sysState.inputs[16], sysState.inputs[17]);
+    knob2.updateQuadInputs(sysState.inputs[16], sysState.inputs[17]);
     InstrumentKnob.updateQuadInputs(sysState.inputs[18], sysState.inputs[19]); 
-    if(!sysState.stereo) // no knob volume control in stereo mode
-    {
-      volumeKnob.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
-    }
+    knob4.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
+
+    sysState.volume = knob4.getValue();
+    __atomic_store_n(&sysState.waveType, knob2.getValue(), __ATOMIC_RELAXED);
+
+  
+    // if(!sysState.stereo) // no knob volume control in stereo mode
+    // {
+      
+    // }
 
     // store key presses in sysState and manage reverb
     for(int i = 0; i < 2*CHANNELS; i++)
@@ -873,10 +861,10 @@ void displayUpdateTask(void * pvParameters)
     u8g2.print(octaveKnob.getValue());
 
     // display wave type of current keyboard
-    textWidth = u8g2.getStrWidth("Wave: ") + u8g2.getStrWidth(waveTypes[waveKnob.getValue()]);
+    textWidth = u8g2.getStrWidth("Wave: ") + u8g2.getStrWidth(waveTypes[sysState.waveType]);
     u8g2.setCursor(displayWidth - textWidth, 20);
     u8g2.print("Wave: ");
-    u8g2.print(waveTypes[waveKnob.getValue()]);
+    u8g2.print(waveTypes[sysState.waveType]);
 
     // temporarily removed
     // textWidth = u8g2.getStrWidth("Instr: ") + u8g2.getStrWidth(instrumentTypes[InstrumentKnob.getValue()]);
@@ -887,7 +875,7 @@ void displayUpdateTask(void * pvParameters)
     // display volume of current keyboard
     u8g2.setCursor(2,30);
     u8g2.print("Vol: ");
-    u8g2.print(volumeKnob.getValue());
+    u8g2.print(sysState.volume);
 
     // display last received CAN message
     u8g2.setCursor(63,30);
@@ -1003,19 +991,20 @@ void genBufferTask(void *pvParameters)
   while(1)
   {
     xSemaphoreTake(sampleBufferSemaphore, portMAX_DELAY);
+    int waveType = sysState.waveType;
     for (uint32_t writeCtr = 0; writeCtr < SAMPLE_BUFFER_SIZE/2; writeCtr++)
     {
       v_delta = 0;
       Vout = 0;
 
-      int waveType = waveKnob.getValue();
-      
+  
       // loop through internal channels
       for (int i = 0; i < 2*CHANNELS; i++)
       {
         if (currentStepSize[i] == 0) { continue; };
 
         phaseAcc[i] += currentStepSize[i];
+
 
         // Generate waveform based on waveType
         if (waveType == 0) // Sawtooth Wave
@@ -1024,7 +1013,8 @@ void genBufferTask(void *pvParameters)
         }
         else if (waveType == 1) // Sine Wave
         {
-          int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
+          // int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
+          int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & ((1 << SINE_RESOLUTION_BITS) - 1);
           v_delta = sineLookup[angle];
         }
         else if (waveType == 2) // Square Wave
@@ -1036,13 +1026,23 @@ void genBufferTask(void *pvParameters)
         // float newValue = 1.0f - (channelTimes[i] * (1.0f / DAMPER_RESOLUTION));
         // v_delta *= newValue;
 
-        Vout += v_delta * applyADSR(i);
+        // Vout += v_delta * applyADSR(i);
+        Vout += v_delta;
       }
 
       // Apply volume control using logarithmic tapering
-      // Vout = Vout >> (8 - volumeKnob.getValue());
+      // Vout = Vout >> (12 - sysState.volume);
+      Vout = Vout;
 
-      Vout = constrain(Vout + 2048, 0, 4095);
+      // Normalize the volume when multiple keys are pressed
+      // if (activeKeys > 0) {
+      //   Vout /= activeKeys;
+      // }
+
+      // Vout = constrain(Vout + 2048, 0, 4095);
+      // Vout += 2048;
+      // if (Vout > 4095) Vout = 4095;
+      // if (Vout < 0) Vout = 0;
 
       if (writeBuffer1)
       {
@@ -1053,15 +1053,12 @@ void genBufferTask(void *pvParameters)
         sampleBuffer0[writeCtr] = Vout;
       } 
     }
+
+    #ifdef TESTING
+    break;
+    #endif
   }
 }
-
-#define WAVEFORM_SIZE 32
-volatile uint16_t Waveform_LUT[WAVEFORM_SIZE] = {
-    2048, 2447, 2831, 3185, 3495, 3750, 3939, 4056, 4095, 4056, 3939, 3750, 
-    3495, 3185, 2831, 2447, 2048, 1648, 1264,  910,  600,  345,  156,   39,  
-       0,   39,  156,  345,  600,  910, 1264, 1648
-};
 
 void MX_GPIO_Init(void)
 {
@@ -1215,34 +1212,6 @@ void MX_ADC1_Init(void)
 
 }
 
-// uint32_t Read_ADC(uint32_t channel) {
-//   ADC_ChannelConfTypeDef sConfig = {0};
-//   sConfig.Channel = channel;
-//   sConfig.Rank = ADC_REGULAR_RANK_1;
-//   sConfig.SamplingTime = ADC_SAMPLETIME_12CYCLES_5;
-
-//   HAL_ADC_ConfigChannel(&hadc1, &sConfig);
-//   HAL_ADC_Start(&hadc1);
-//   HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
-//   uint32_t value = HAL_ADC_GetValue(&hadc1);
-//   HAL_ADC_Stop(&hadc1);
-//   return value;
-// }
-
-#define NS  128
-
-uint16_t Wave_LUT[NS] = {
-    2048, 2149, 2250, 2350, 2450, 2549, 2646, 2742, 2837, 2929, 3020, 3108, 3193, 3275, 3355,
-    3431, 3504, 3574, 3639, 3701, 3759, 3812, 3861, 3906, 3946, 3982, 4013, 4039, 4060, 4076,
-    4087, 4094, 4095, 4091, 4082, 4069, 4050, 4026, 3998, 3965, 3927, 3884, 3837, 3786, 3730,
-    3671, 3607, 3539, 3468, 3394, 3316, 3235, 3151, 3064, 2975, 2883, 2790, 2695, 2598, 2500,
-    2400, 2300, 2199, 2098, 1997, 1896, 1795, 1695, 1595, 1497, 1400, 1305, 1212, 1120, 1031,
-    944, 860, 779, 701, 627, 556, 488, 424, 365, 309, 258, 211, 168, 130, 97,
-    69, 45, 26, 13, 4, 0, 1, 8, 19, 35, 56, 82, 113, 149, 189,
-    234, 283, 336, 394, 456, 521, 591, 664, 740, 820, 902, 987, 1075, 1166, 1258,
-    1353, 1449, 1546, 1645, 1745, 1845, 1946, 2047
-};
-
 // extern "C" void TIM2_IRQHandler(void) {
 //   if (__HAL_TIM_GET_FLAG(&htim2, TIM_FLAG_UPDATE) != RESET) {
 //       __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
@@ -1276,7 +1245,7 @@ void setup()
 
   // compute step sizes from key frequencies
   for (int i = 0; i < 12; ++i) {
-    stepSizes[i] = (uint32_t)(4294967296.0 * keyFreqs[i] / 22000.0);
+    stepSizes[i] = (uint32_t)(4294967296.0 * keyFreqs[i] / 22000.0) >> 4;
   }
 
   // create systate mutex
@@ -1299,7 +1268,6 @@ void setup()
     sysState.keyPressed[i] = 0xFFFF;
   }
 
-  
   #ifndef TESTING
   // start key scanning thread
   TaskHandle_t scanKeysHandle = NULL;
@@ -1357,7 +1325,7 @@ void setup()
   "genBuffer",		/* Text name for the task */
   256,      		/* Stack size in words, not bytes */
   NULL,			/* Parameter passed into the task */
-  1,			/* Task priority */
+  5,			/* Task priority */
   &genBuffer );	/* Pointer to store the task handle */
   
   // Create the monitor task
@@ -1370,7 +1338,7 @@ void setup()
   while(phase < SINE_RESOLUTION)
   {
     sineLookup[phase] = std::round(2048 * std::sin((2*M_PI*phase)/SINE_RESOLUTION));
-    phase++;
+    phase+=1;
   }
 
   //Set pin directions
@@ -1440,6 +1408,7 @@ void setup()
   test_displayUpdateTask();
   // test_sendCanTask();
   test_scanKeysTask();
+  test_genBufferTask();
   //test_checkHandshakeTask();
   #endif
 }
