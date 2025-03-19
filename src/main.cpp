@@ -822,6 +822,9 @@ void scanKeysTask(void * pvParameters)
 }
 
 // task to update OLED display every 100ms
+#define NUM_PAGES 3  // Number of pages
+int currentPage = 0;  // Start with the first page
+
 void displayUpdateTask(void * pvParameters)
 {
   #ifndef TESTING
@@ -829,93 +832,175 @@ void displayUpdateTask(void * pvParameters)
   TickType_t xLastWakeTime = xTaskGetTickCount();
   #endif
 
-  // strings used for display
+  // Strings used for display
   const char* keyNames [12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+  const int keyWidths[12] = {2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};  // Width of each key
+  const int keyHeights[12] = {30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30}; // Height of keys
+
   const char* waveTypes[3] = {"Saw", "Sine", "Square"};
   const char* instrumentTypes[2] = {"Drums", "Piano"};
+
+  int lastJoystickHoriz = 0;  // To track the previous horizontal joystick position
 
   while(1)
   {
     #ifndef TESTING
-    // ensures we update screen every 100ms
+    // ensures we update the screen every 200ms
     vTaskDelayUntil( &xLastWakeTime, xFrequency );
     #endif
 
     // take systate mutex
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
 
-    u8g2.clearBuffer();         // clear the internal memory
-    u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-    
-    // display notes pressed on current keyboard
-    u8g2.setCursor(2,10);
-    u8g2.print("Keys: ");
+    // Read joystick horizontal position
+    int joystick_horiz;
+    readJoystick(&joystick_horiz, NULL);
 
-    // Print the keys that are pressed
-    for (int i = 0; i < CHANNELS; i++) {
-      if (sysState.keyPressed[i] != 0xFFFF) {
-        
-        u8g2.print(keyNames[sysState.keyPressed[i] & 0xFF]);
-        u8g2.print(" ");
+    // If joystick moved left or right (and no key is being pressed)
+    if (joystick_horiz != lastJoystickHoriz && sysState.keyPressed[0] == 0xFFFF)
+    {
+      if (joystick_horiz > 50)  // Joystick moved right
+      {
+        currentPage = (currentPage + 1) % NUM_PAGES;  // Go to next page
+      }
+      else if (joystick_horiz < -50)  // Joystick moved left
+      {
+        currentPage = (currentPage - 1 + NUM_PAGES) % NUM_PAGES;  // Go to previous page
       }
     }
+    lastJoystickHoriz = joystick_horiz;
 
-    // Determine the width of the display
+    // Clear display buffer before drawing
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_ncenB08_tr);  // Choose a suitable font
+
+    // Declare display width and text width variables before switch
     int displayWidth = u8g2.getDisplayWidth();
-    
-    int textWidth = u8g2.getStrWidth("00"); // RECV and SEND have same width
-    u8g2.setCursor(displayWidth - textWidth, 10);
-    u8g2.print(sysState.BOARD_ID);
+    int textWidth = u8g2.getStrWidth("00");
 
-    // display octave of current keyboard
-    u8g2.setCursor(2,20);
-    u8g2.print("Oct: ");
-    u8g2.print(octaveKnob.getValue());
-
-    // display wave type of current keyboard
-    textWidth = u8g2.getStrWidth("Wave: ") + u8g2.getStrWidth(waveTypes[waveKnob.getValue()]);
-    u8g2.setCursor(displayWidth - textWidth, 20);
-    u8g2.print("Wave: ");
-    u8g2.print(waveTypes[waveKnob.getValue()]);
-
-    // temporarily removed
-    // textWidth = u8g2.getStrWidth("Instr: ") + u8g2.getStrWidth(instrumentTypes[InstrumentKnob.getValue()]);
-    // u8g2.setCursor(displayWidth - textWidth, 30);
-    // u8g2.print("Instr: ");
-    // u8g2.print(instrumentTypes[InstrumentKnob.getValue()]);
-
-    // display volume of current keyboard
-    u8g2.setCursor(2,30);
-    u8g2.print("Vol: ");
-    u8g2.print(volumeKnob.getValue());
-
-    // display last received CAN message
-    u8g2.setCursor(63,30);
-    u8g2.print((char) RX_Message_Temp[0]);
-    u8g2.print(RX_Message_Temp[1]);
-    u8g2.print(RX_Message_Temp[2]);
-
-    if(sysState.handshakePending)
+    // Draw content for the current page
+    switch (currentPage)
     {
-      textWidth = u8g2.getStrWidth("HAND");
-      u8g2.setCursor(displayWidth - textWidth, 10);
-      u8g2.print("HAND");
+      case 0:  // Page 1 (Current Information)
+        // Display keys pressed
+        u8g2.setCursor(2, 10);
+        u8g2.print("Keys: ");
+        for (int i = 0; i < CHANNELS; i++) {
+          if (sysState.keyPressed[i] != 0xFFFF) {
+            u8g2.print(keyNames[sysState.keyPressed[i] & 0xFF]);
+            u8g2.print(" ");
+          }
+        }
+
+        // Display other current information (octave, wave, volume, etc.)
+        u8g2.setCursor(displayWidth - textWidth, 10);
+        u8g2.print(sysState.BOARD_ID);
+
+        u8g2.setCursor(2, 20);
+        u8g2.print("Oct: ");
+        u8g2.print(octaveKnob.getValue());
+
+        textWidth = u8g2.getStrWidth("Wave: ") + u8g2.getStrWidth(waveTypes[waveKnob.getValue()]);
+        u8g2.setCursor(displayWidth - textWidth, 20);
+        u8g2.print("Wave: ");
+        u8g2.print(waveTypes[waveKnob.getValue()]);
+
+        u8g2.setCursor(2, 30);
+        u8g2.print("Vol: ");
+        u8g2.print(volumeKnob.getValue());
+
+        u8g2.setCursor(63, 30);
+        u8g2.print((char) RX_Message_Temp[0]);
+        u8g2.print(RX_Message_Temp[1]);
+        u8g2.print(RX_Message_Temp[2]);
+
+        if (sysState.handshakePending) {
+          textWidth = u8g2.getStrWidth("HAND");
+          u8g2.setCursor(displayWidth - textWidth, 10);
+          u8g2.print("HAND");
+        }
+        break;
+
+        case 1:  
+          // Display keys pressed
+          u8g2.setCursor(2, 10);
+          u8g2.print("Keys: ");
+          for (int i = 0; i < CHANNELS; i++) {
+            if (sysState.keyPressed[i] != 0xFFFF) {
+              u8g2.print(keyNames[sysState.keyPressed[i] & 0xFF]);
+              u8g2.print(" ");
+            }
+          }
+
+          // Display other current information (octave, wave, volume, etc.)
+          u8g2.setCursor(displayWidth - textWidth, 10);
+          u8g2.print(sysState.BOARD_ID);
+
+          u8g2.setCursor(2, 20);
+          u8g2.print("Features: ");
+          u8g2.print(octaveKnob.getValue());
+
+          textWidth = u8g2.getStrWidth("Wave: ") + u8g2.getStrWidth(waveTypes[waveKnob.getValue()]);
+          u8g2.setCursor(displayWidth - textWidth, 20);
+          u8g2.print("Wave: ");
+          u8g2.print(waveTypes[waveKnob.getValue()]);
+
+          u8g2.setCursor(2, 30);
+          u8g2.print("Instrument: ");
+          u8g2.print(volumeKnob.getValue());
+
+          u8g2.setCursor(63, 30);
+          u8g2.print((char) RX_Message_Temp[0]);
+          u8g2.print(RX_Message_Temp[1]);
+          u8g2.print(RX_Message_Temp[2]);
+
+          if (sysState.handshakePending) {
+            textWidth = u8g2.getStrWidth("HAND");
+            u8g2.setCursor(displayWidth - textWidth, 10);
+            u8g2.print("HAND");
+          }
+          break;
+
+
+      case 2:  
+        u8g2.setCursor(2, 10);
+        u8g2.print("ADSR:");
+
+        // Display some settings or additional data
+        u8g2.setCursor(3, 20);
+        u8g2.print("Attack: ");
+        u8g2.print(octaveKnob.getValue());
+
+        textWidth = u8g2.getStrWidth("Decay: ") + u8g2.getStrWidth(waveTypes[waveKnob.getValue()]);
+        u8g2.setCursor(displayWidth - textWidth, 20);
+        u8g2.print("Sustain: ");
+        u8g2.print(waveTypes[waveKnob.getValue()]);
+
+        u8g2.setCursor(3, 30);
+        u8g2.print("Release: ");
+        u8g2.print(volumeKnob.getValue());
+
+
+        break;
+
+      // Add more pages here if needed
     }
 
-    // push screen buffer to display
+    // Push the screen buffer to display
     u8g2.sendBuffer();
 
-    // toggle lED
+    // Toggle LED to show we're still working
     digitalToggle(LED_BUILTIN);
 
-    // release systate mutex
+    // Release systate mutex
     xSemaphoreGive(sysState.mutex);
 
     #ifdef TESTING
-    break; // only run 1 iter for testing
+    break; // Only run 1 iteration for testing
     #endif
   } 
 }
+
 
 // scan TX mailbox and wait until a mailbox is available
 void sendCanTask (void * pvParameters) {
@@ -945,7 +1030,7 @@ void TaskMonitor(void *pvParameters) {
   char statsBuffer[512];
 
   while (1) {
-      vTaskGetRunTimeStats(statsBuffer);
+      //vTaskGetRunTimeStats(statsBuffer);
       Serial.println("Task Execution Time Stats:");
       Serial.println(statsBuffer);
 
