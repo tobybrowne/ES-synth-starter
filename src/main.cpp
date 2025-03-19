@@ -46,6 +46,12 @@ const uint16_t sine_wave[SINE_WAVE_SIZE] = {
   5996, 5985, 5973, 5961, 5949, 5937, 5925, 5912, 5900, 5887, 5874, 5861, 5848, 5835, 5822, 5808
 };
 
+const int SAMPLE_BUFFER_SIZE = 128;
+uint8_t sampleBuffer0[SAMPLE_BUFFER_SIZE/2];
+uint8_t sampleBuffer1[SAMPLE_BUFFER_SIZE/2];
+volatile bool writeBuffer1 = false;
+SemaphoreHandle_t sampleBufferSemaphore; 
+
 //#define TESTING
 
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
@@ -322,71 +328,94 @@ void sendStereoBalance(int stereoBalance)
 
 // sets speaker voltage 22,000 times per sec
 // TODO: read systate and currentStepSize atomically
+// void sampleISR()
+// {
+//     static uint32_t phaseAcc[CHANNELS * 2] = {0};
+//     int16_t Vout = 0;
+//     int waveType = waveKnob.getValue();
+
+//     // play drum overlay
+//     if (InstrumentKnob.getValue() == 0)
+//     {
+//       Vout = drum();
+//     }
+ 
+//     for (int i = 0; i < CHANNELS * 2; i++)
+//     {
+//       if (currentStepSize[i] == 0) { continue; };
+
+//       phaseAcc[i] += currentStepSize[i];
+//       int16_t v_delta = 0;
+
+//       // Generate waveform based on waveType
+//       if (waveType == 0) // Sawtooth Wave
+//       {
+//           v_delta = (phaseAcc[i] >> 20) - 2048;
+//       }
+//       else if (waveType == 1) // Sine Wave
+//       {
+//           int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
+//           v_delta = sineLookup[angle];
+//       }
+//       else if (waveType == 2) // Square Wave
+//       {
+//           v_delta = (phaseAcc[i] > (1 << 31)) ? 2047 : -2048;
+//       }
+
+//       // Apply damper effect
+//       float newValue = 1.0f - (channelTimes[i] * (1.0f / DAMPER_RESOLUTION));
+//       v_delta *= newValue;
+
+//       Vout += v_delta;
+//     }
+    
+//     // Apply volume control using logarithmic tapering
+//     Vout = Vout >> (8 - volumeKnob.getValue());
+
+//     // Ensure Vout stays within 0-4095 range for 12-bit DAC
+//     Vout = constrain(Vout + 2048, 0, 4095);
+    
+//     // write DAC
+//     HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, Vout);
+// }
+
 void sampleISR()
 {
-    static uint32_t phaseAcc[CHANNELS * 2] = {0};
-    int16_t Vout = 0;
-    int waveType = waveKnob.getValue();
+  static uint32_t readCtr = 0;
 
-    // play drum overlay
-    if (InstrumentKnob.getValue() == 0)
-    {
-      Vout = drum();
-    }
- 
-    for (int i = 0; i < CHANNELS * 2; i++)
-    {
-      if (currentStepSize[i] == 0) { continue; };
-
-      phaseAcc[i] += currentStepSize[i];
-      int16_t v_delta = 0;
-
-      // Generate waveform based on waveType
-      if (waveType == 0) // Sawtooth Wave
-      {
-          v_delta = (phaseAcc[i] >> 20) - 2048;
-      }
-      else if (waveType == 1) // Sine Wave
-      {
-          int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
-          v_delta = sineLookup[angle];
-      }
-      else if (waveType == 2) // Square Wave
-      {
-          v_delta = (phaseAcc[i] > (1 << 31)) ? 2047 : -2048;
-      }
-
-      // Apply damper effect
-      float newValue = 1.0f - (channelTimes[i] * (1.0f / DAMPER_RESOLUTION));
-      v_delta *= newValue;
-
-      Vout += v_delta;
-    }
+  if (readCtr == SAMPLE_BUFFER_SIZE/2)
+  {
+    readCtr = 0;
+    writeBuffer1 = !writeBuffer1;
+    xSemaphoreGiveFromISR(sampleBufferSemaphore, NULL);
+  }
     
-    // Apply volume control using logarithmic tapering
-    Vout = Vout >> (8 - volumeKnob.getValue());
-
-    // Ensure Vout stays within 0-4095 range for 12-bit DAC
-    Vout = constrain(Vout + 2048, 0, 4095);
-    
-    // write DAC
-    HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, Vout);
+  if (writeBuffer1)
+  {
+    HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, sampleBuffer0[readCtr++]);
+    // Serial.println(sampleBuffer0[readCtr++]);
+  }
+  else
+  {
+    HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, sampleBuffer1[readCtr++]);
+    // Serial.println(sampleBuffer1[readCtr++]);
+  }
 }
 
 // attach/detach sampling ISR
 void toggleSampleISR(bool on)
 {
-  if(on)
-  { 
-    // initialise sampling interrupt (22,000 times a sec)
-    sampleTimer.setOverflow(22000, HERTZ_FORMAT);
-    sampleTimer.attachInterrupt(sampleISR);
-    sampleTimer.resume();
-  }
-  else
-  {
-    sampleTimer.detachInterrupt();
-  }
+  // if(on)
+  // { 
+  //   // initialise sampling interrupt (22,000 times a sec)
+  //   sampleTimer.setOverflow(22000, HERTZ_FORMAT);
+  //   sampleTimer.attachInterrupt(sampleISR);
+  //   sampleTimer.resume();
+  // }
+  // else
+  // {
+  //   sampleTimer.detachInterrupt();
+  // }
 }
 
 // task to check handshake inputs every 20ms
@@ -604,7 +633,6 @@ void scanKeysTask(void * pvParameters)
     uint32_t currentStepSize_Local[2*CHANNELS] = {0};
 
     readJoystick(&joystick_horiz, &joystick_vert);
-    Serial.println(joystick_vert);
 
     if(joystick_horiz != last_joystick_horiz)
     {
@@ -924,6 +952,41 @@ void TaskMonitor(void *pvParameters) {
   }
 }
 
+// auto writes when buffer is available
+void genBufferTask(void *pvParameters)
+{
+  // only 1 channel
+  static uint32_t phaseAcc = 0;
+  static uint16_t Vout = 0; //Calculate one sample
+
+  while(1)
+  {
+    xSemaphoreTake(sampleBufferSemaphore, portMAX_DELAY);
+    for (uint32_t writeCtr = 0; writeCtr < SAMPLE_BUFFER_SIZE/2; writeCtr++)
+    {
+      // TODO: gen a signal here
+      
+
+      // int angle = (phaseAcc >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
+      // Vout = sineLookup[angle];
+
+      Vout = (phaseAcc >> 20) - 2048;
+
+      if (writeBuffer1)
+      {
+        sampleBuffer1[writeCtr] = Vout + 2048;
+      }
+        
+      else
+      {
+        sampleBuffer0[writeCtr] = Vout + 2048;
+      } 
+      
+      phaseAcc+=currentStepSize[0];
+    }
+  }
+}
+
 #define WAVEFORM_SIZE 32
 volatile uint16_t Waveform_LUT[WAVEFORM_SIZE] = {
     2048, 2447, 2831, 3185, 3495, 3750, 3939, 4056, 4095, 4056, 3939, 3750, 
@@ -1142,34 +1205,6 @@ void setup()
 
   HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
 
-  // HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 0);  // Set interrupt priority
-  // HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
-
-  // HAL_StatusTypeDef status = HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)Wave_LUT, NS, DAC_ALIGN_12B_R);
-  // if (status != HAL_OK)
-  // {
-  //   Serial.println("DMA Init Failed!");
-  // }
-  // else
-  // {
-  //   Serial.println("DMA Init Success!");
-  // }
-
-
-
-  // while (1)
-  // {
-  //     // for (int i = 0; i < NS; i++) 
-  //     // {
-  //     //     HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, Wave_LUT[i]);
-          
-  //     // }
-
-  //     // Serial.println(HAL_DAC_GetValue(&hdac, DAC_CHANNEL_1));
-  //     // delay(10);
-  // }
-
-
   // compute step sizes from key frequencies
   for (int i = 0; i < 12; ++i) {
     stepSizes[i] = (uint32_t)(4294967296.0 * keyFreqs[i] / 22000.0);
@@ -1177,6 +1212,10 @@ void setup()
 
   // create systate mutex
   sysState.mutex = xSemaphoreCreateMutex();
+
+  // create double buffering mutex
+  sampleBufferSemaphore = xSemaphoreCreateBinary();
+  xSemaphoreGive(sampleBufferSemaphore);
 
   // init CAN mailbox semaphore
   CAN_TX_Semaphore = xSemaphoreCreateCounting(3,3);
@@ -1242,6 +1281,15 @@ void setup()
   NULL,			/* Parameter passed into the task */
   3,			/* Task priority */
   &checkHandshake );	/* Pointer to store the task handle */
+
+  TaskHandle_t genBuffer = NULL;
+  xTaskCreate(
+  genBufferTask,		/* Function that implements the task */
+  "genBuffer",		/* Text name for the task */
+  256,      		/* Stack size in words, not bytes */
+  NULL,			/* Parameter passed into the task */
+  3,			/* Task priority */
+  &genBuffer );	/* Pointer to store the task handle */
   
   // Create the monitor task
   xTaskCreate(TaskMonitor, "Monitor", 2000, NULL, 1, NULL);
@@ -1305,6 +1353,10 @@ void setup()
   #endif
 
   CAN_Start();
+
+  sampleTimer.setOverflow(22000, HERTZ_FORMAT);
+  sampleTimer.attachInterrupt(sampleISR);
+  sampleTimer.resume();
 
 
 
