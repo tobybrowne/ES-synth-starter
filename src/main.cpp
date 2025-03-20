@@ -85,6 +85,7 @@ SemaphoreHandle_t sampleBufferSemaphore;
   // stores an int from 0 -> DAMPER_RESOLUTION
   float DAMPER_RESOLUTION = 30;
   volatile int channelTimes[2*CHANNELS] = {0};
+  volatile int releaseTimes[2*CHANNELS] = {0};
 
   // TODO: make these memory safe by moving into sysState (described in Lab2)
   // stores the last sent/received CAN message
@@ -642,7 +643,7 @@ void scanKeysTask(void * pvParameters)
     for(int i = 0; i < CHANNELS*2; i++)
     {
       newValue = channelTimes[i] + 1;
-      if(newValue > DAMPER_RESOLUTION){ newValue = DAMPER_RESOLUTION; }
+      // if(newValue > DAMPER_RESOLUTION){ newValue = DAMPER_RESOLUTION; }
       __atomic_store_n(&channelTimes[i], newValue, __ATOMIC_RELAXED);
     }
 
@@ -765,21 +766,47 @@ void scanKeysTask(void * pvParameters)
     // store key presses in sysState and manage reverb
     for(int i = 0; i < 2*CHANNELS; i++)
     {
-      if(sysState.reverb)
+      // key is off
+      // KEY IS TURNED OFF IN ADSR FUNCTION!
+      if(keyPressedLocal[i] == 0xFFFF)
       {
-        if(keyPressedLocal[i] != 0xFFFF)
+        if(releaseTimes[i] == 0)
         {
-          sysState.keyPressed[i] = keyPressedLocal[i];
-        }
-        else if(channelTimes[i] > DAMPER_RESOLUTION - 1)
-        {
-          sysState.keyPressed[i] = 0xFFFF;
+          releaseTimes[i] = channelTimes[i];
         }
       }
+
+      // key is on
       else
       {
         sysState.keyPressed[i] = keyPressedLocal[i];
       }
+
+      // if(keyPressedLocal[i] != 0xFFFF)
+      // {
+      //   sysState.keyPressed[i] = keyPressedLocal[i];
+      // }
+      // THIS NEVER TURNS KEYS OFF!!!
+
+
+
+      // sysState.keyPressed[i] = keyPressedLocal[i];
+
+      // if(sysState.reverb)
+      // {
+      //   if(keyPressedLocal[i] != 0xFFFF)
+      //   {
+      //     sysState.keyPressed[i] = keyPressedLocal[i];
+      //   }
+      //   else if(channelTimes[i] > DAMPER_RESOLUTION - 1)
+      //   {
+      //     sysState.keyPressed[i] = 0xFFFF;
+      //   }
+      // }
+      // else
+      // {
+      //   sysState.keyPressed[i] = keyPressedLocal[i];
+      // }
     }
 
     // convert key presses to step sizes (both internal and external)
@@ -945,39 +972,53 @@ void TaskMonitor(void *pvParameters) {
 // piano? / strings / guitar / drums
 float attackTime = 20;    
 float decayTime = 20;     
-float sustainLevel = 22; 
-float releaseTime = 30;   
+float sustainLevel = 1; // number from 0 to 1
+float releaseTime = 200;   
 
-float applyADSR(int i) {
+float applyADSR(int i)
+{
   unsigned long currentTime = channelTimes[i];  
   float envelope = 0;
-  // if pressed, assign ADSR state 
-  if (sysState.keyPressed[i] != 0xFFFF) {  // If the key is pressed
-      // attack: increase amp gradually 
-      if (currentTime < attackTime) {
-           envelope = (float)currentTime / attackTime;  
-      }
-      // decay: decrease to sustain amp
-      else if (currentTime < attackTime + decayTime) {
-          float decayProgress = (float)(currentTime - attackTime) / decayTime;
-          envelope = 1 - (1 - sustainLevel) * decayProgress;  
-      }
-      // sustain 
-      else {
-          envelope = sustainLevel;
-      }
-  } else { 
-      // release: smooth out after release 
-      if (currentTime < releaseTime) {
-          envelope = sustainLevel - (sustainLevel * (float)(currentTime) / releaseTime);  
-      } 
-      // else {
-      //     envelope = 0; 
-      // }
+
+  // key is in release stage
+  if(releaseTimes[i] !=0 )
+  {
+    int scaled_sustain = 100*sustainLevel;
+    envelope = (scaled_sustain) - (scaled_sustain * ((currentTime - releaseTimes[i])*100)/(releaseTime*100));
+    envelope = envelope / 100;
+    if(envelope < 0.01)
+    {
+      // turn key off
+      // TODO: does keyPressed and releaseTimes need atomic access?
+      sysState.keyPressed[i] = 0xFFFF;
+      releaseTimes[i] = 0;
+    }
+  }
+  else
+  {
+    // attack: increase amp gradually 
+    if (currentTime < attackTime)
+    {
+      envelope = (float)currentTime / attackTime;  
+    }
+    // decay: decrease to sustain amp
+    else if (currentTime < attackTime + decayTime)
+    {
+      float decayProgress = (float)(currentTime - attackTime) / decayTime;
+      envelope = 1 - (1 - sustainLevel) * decayProgress;  
+    }
+    // sustain 
+    else
+    {
+      envelope = sustainLevel;
+    }
   }
 
+
   // Ensure envelope stays within bounds (0 to 1)
-  return constrain(envelope, 0, 1);
+  if(envelope > 1) envelope = 1;
+  if(envelope < 0) envelope = 0;
+  return envelope;
 }
 
 // auto writes when buffer is available
@@ -996,7 +1037,6 @@ void genBufferTask(void *pvParameters)
     {
       v_delta = 0;
       Vout = 0;
-
   
       // loop through internal channels
       for (int i = 0; i < 2*CHANNELS; i++)
@@ -1004,7 +1044,6 @@ void genBufferTask(void *pvParameters)
         if (currentStepSize[i] == 0) { continue; };
 
         phaseAcc[i] += currentStepSize[i];
-
 
         // Generate waveform based on waveType
         if (waveType == 0) // Sawtooth Wave
@@ -1026,13 +1065,13 @@ void genBufferTask(void *pvParameters)
         // float newValue = 1.0f - (channelTimes[i] * (1.0f / DAMPER_RESOLUTION));
         // v_delta *= newValue;
 
-        // Vout += v_delta * applyADSR(i);
-        Vout += v_delta;
+        Vout += v_delta * applyADSR(i);
+        //Vout += v_delta;
       }
 
       // Apply volume control using logarithmic tapering
-      // Vout = Vout >> (12 - sysState.volume);
-      Vout = Vout;
+      Vout = Vout >> (12 - sysState.volume);
+      // Vout = Vout;
 
       // Normalize the volume when multiple keys are pressed
       // if (activeKeys > 0) {
@@ -1245,7 +1284,7 @@ void setup()
 
   // compute step sizes from key frequencies
   for (int i = 0; i < 12; ++i) {
-    stepSizes[i] = (uint32_t)(4294967296.0 * keyFreqs[i] / 22000.0) >> 4;
+    stepSizes[i] = (uint32_t)(4294967296.0 * keyFreqs[i] / 22000.0);
   }
 
   // create systate mutex
