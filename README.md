@@ -29,17 +29,14 @@ In this scenario, the task takes an average Xμs to execute.
 
 ### DisplayUpdateTask
 This is an RTOS task that updates the OLED display to form a user interface.
-
-The MII of this task is 100ms, as this is a sufficient frequency for a user to not notice any latency, however this task must also wait for the `sysState` semaphore before executing.
-
-ADD EXECUTION TIME
+The MII of this task is 100ms, as this is a sufficient frequency for a user to not notice any latency, however this task must also wait for the `sysState` semaphore before executing. We measured the worst-case execution time by simulating events that trigger as many screen events as possible. This gives us a worst-case execution time of 17290μs.
 
 ### CAN_RX_ISR
 This is an interrupt that runs whenever the device receives a CAN message. It takes the message and stores it in a global thread safe queue, for further processing in another module. This interrupt is intentionally kept as small as possible to minimise disruptions to the scheduler.
 
 The execution time of this interrupt will always be the same, as it is only called when there is a packet to process. Therefore, by filling the RX buffer with packets to process, we can easily find the execution time of this interrupt to be 11μs.
 
-The MII of this process is slightly harder to define, as it would usually depend upon the rate at which other boards transmit CAN messages. The absolute MII would likely be  the minimum possible period between CAN message. For our setup this is about 960μs.
+The MII of this process is slightly harder to define, as it would usually depend upon the rate at which other boards transmit CAN messages. The absolute MII would likely be the minimum possible period between CAN message. For our setup this is about 960μs. However a more reasonable value to use for calculations is 10 per second or a period of 100,000 μs.
 
 ### ReceiveCanTask
 This is an RTOS task which processes the CAN messages placed in the global RX queue by CAN_RX_ISR. This system has 3 types of CAN messages, each distinguished by their first byte:
@@ -52,22 +49,22 @@ This is an RTOS task which processes the CAN messages placed in the global RX qu
 
 - Press/Release messages inform the master board as to which notes it should be playing from other boards.
 
-We found that the most complex of these messages to process was a key release, so we can use this time as our worst case execution of this task. We found this worst case execution time to be Xμs.
+We found that the most complex of these messages to process was a key release, so we can use this time as our worst case execution of this task. We found this worst case execution time to be 10μs.
 
-This task will only run if data exists inside the RX buffer and if the `sysState` semaphore is free. WHAT IS THE MII!!
+This task will only run if data exists inside the RX buffer and if the `sysState` semaphore is free, so we assign it the same MII as the interrupts: 100,000 μs.
 
 ### CAN_TX_ISR
-This in an interrupt that frees a semaphore when a CAN mailbox is available. This allows the `sendCanTask` to know when it can transmit it's messages. The timing for this process is fairly constant at about 11μs, the same as the receive interrupt. Again we can make the same assumption regarding CAN rates and say that the MII is around 960μs.
+This in an interrupt that frees a semaphore when a CAN mailbox is available. This allows the `sendCanTask` to know when it can transmit it's messages. The timing for this process is fairly constant at about 11μs, the same as the receive interrupt. Again we can make the same assumption regarding CAN rates and say that the MII is around 100,000 μs.
 
 ### SendCanTask
-This is an RTOS task that runs when data exists in the global CAN TX queue and when a CAN mailbox is free (indicated by the semaphore discussed previously). It takes the semaphore and then transmits the message. The execution time for this process is about Xμs. WHAT IS THE MII!
+This is an RTOS task that runs when data exists in the global CAN TX queue and when a CAN mailbox is free (indicated by the semaphore discussed previously). It takes the semaphore and then transmits the message. The execution time for this process is about 855μs, and we assign it the same MII of 100,000 μs.
 
 ### CheckHandshakeTask
 This is an RTOS task that monitors the handshake inputs on the board. When certain conditions are met (like a board being plugged in or removed), all the boards enter a handhake procedure, where the leftmost board is assigned the ID 0. This left-most board can then drop it's east facing signal and send it's ID+1 over CAN, the board to it's right will detect the drop in it's west voltage and listen for this ID. The process continues until every board is assigned an ID, the rightmost board then sends a message telling the boards that handshaking is over and they can all reset their handshaking inputs. This reset allows for boards to be hotswapped and reassigned IDs.
 
 The timing for this process is slightly more complex, as it often has to delay whilst waiting for an expected CAN message to arrive. During these delay intervals, the `sysState` mutex is freed, and the CPU is yielded to another task, this allows other processes to execute, and our overall performance to be faily unaffected by these halts. Therefore when timing this process we subtracted these times from the execution time.
 
-The worst case execution time for this task was measured as Xμs, and the MII will be around 200ms as this is the period we set for this task. Again, this task relies on the `sysState` mutex which we are assuming won't delay our initiation.
+The worst case execution time for this task was measured as 25μs, and the MII will be around 200ms as this is the period we set for this task. Again, this task relies on the `sysState` mutex which we are assuming won't delay our initiation.
 
 ### GenBufferTask
 This is an RTOS task that calculates the next 512 amplitudes to be played by the speaker and stores them one half of a 1024 element buffer. Previously, these calculations had been completed in the same interrupt that writes to the speaker, however the constant interruption of scheduling to a heavy calculation process was detrimental to performance. By moving these calculations into a task the scheduler is free to operate much more efficiently.
@@ -87,16 +84,16 @@ To perform a critical instant timing analysis we use the worst case execution ti
 
 | Task Name                               | Initiation Interval (τᵢ) | Execution Time (Tᵢ) | Maximum τᵢ / τᵢ | CPU Utilisation (Tᵢ / τᵢ) |
 |-----------------------------------------|-------------------------|---------------------|---------------------------|------------------------------------|
-| sampleISR                            | 45 μs                   | 0.241 ms            | 5                         | 1.205%                             |
-| receiveCanTask                       |                         | 18.60 ms            | 1                         | 18.6%                              |
-| sendCanTask                          |                         | 0.028 ms            | 22000                     | 61.6%                              |
-| displayUpdateTask                    | 100,000 μs              | 1.116 ms            | 3.97                       | 4.429%                             |
-| scanKeysTask                         | 20,000 μs               | 0.360 ms            | 3.97                       | 1.429%                             |
-| genBufferTask                        | 23,000 μs               | 0.432 ms            | 1.67                       | 0.72%                              |
-| checkHandshakeTask                   | 200,000 μs              | 0.187 ms            | 1.67                       | 0.312%                             |
-| CAN_RX_ISR                           | 960 μs                  | 0.187 ms            | 1.67                       | 0.312%                             |
-| CAN_TX_ISR                           | 960 μs                  | 0.187 ms            | 1.67                       | 0.312%                             |
-| *Total*                              |                         |                     |                           | *88.295%*                        |
+| sampleISR                            | 45 μs                   | 0 μs               | - - -                         | - - -                                |
+| receiveCanTask                       | 100,000 μs              | 10 μs              | 1                             | 0.01%                                 |
+| sendCanTask                          | 100,000 μs              | 855 μs             | 1                             | 0.885%                               |
+| displayUpdateTask                    | 100,000 μs              | 17290 μs           | 1                             | 17.29%                           |
+| scanKeysTask                         | 20,000 μs               | 226 μs             | 5                             | 1.13%                             |
+| genBufferTask                        | 23,000 μs               | 3313 μs            | 4.34                          | 14.37%                            |
+| checkHandshakeTask                   | 200,000 μs              | 25 μs              | 0.5                           | 0.0125%                             |
+| *Total*                              |                         |                    |                               | *33.695%*                        |
+
+As you can see, all the deadlines are met. Even under the worst case conditions, during the 100ms interval of `displayUpdateTask` being completed, the CPU is only utilised for 33.67% of the time. 
 
 ## Shared Data Structures and Synchronisation
 The program makes use of the following shared data structures:
@@ -116,7 +113,11 @@ The program makes use of the following shared data structures:
 - `adsrLookup`: This is a float array storing the envelope for the current ADSR parameters. This must be modified is `scanKeysTask` whenever the ADSR parameters are changed and read inside of `genBuffTask`, to ensure no partial reads occur, since these tasks need to overlap, we use an RTOS critical path to wrap the writes to the memory space, ensuring they are not interrupted.
 
 ## Inter-Task Dependencies and Deadlocking
+The dependency structure between our tasks is fairly simple, very few of the tasks even overlap as they all take in turns utilising the `sysState` mutex.
+Additionally, we only use two types of blocking function.
 
+The first is `vTaskDelayUntil`, since this is a timer based block, it is impossible for this to cause a deadlock.
 
+The second is `xSemaphoreTake`, this can be a deadlock risk, however after analysing our code the team is certain that there is no scenario in which a semaphore will be locked and given away (which would of course lead to a deadlock). This form of analysis is fairly easy due to the simplicity of our tasks.
 
 
