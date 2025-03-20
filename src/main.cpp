@@ -17,10 +17,10 @@ DMA_HandleTypeDef hdma_dac1;
 TIM_HandleTypeDef htim2;
 ADC_HandleTypeDef hadc1;
 
-// Interrupt handler for DMA1 channel 3
-extern "C" void DMA1_Channel3_IRQHandler(void) {
-  HAL_DMA_IRQHandler(&hdma_dac1);
-}
+// // Interrupt handler for DMA1 channel 3
+// extern "C" void DMA1_Channel3_IRQHandler(void) {
+//   HAL_DMA_IRQHandler(&hdma_dac1);
+// }
 
 // extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 //   if (htim->Instance == TIM2) {  // Check if it's TIM2
@@ -28,16 +28,16 @@ extern "C" void DMA1_Channel3_IRQHandler(void) {
 //   }
 // }
 
-const int SAMPLE_BUFFER_SIZE = 512;
-uint8_t sampleBuffer0[SAMPLE_BUFFER_SIZE/2];
-uint8_t sampleBuffer1[SAMPLE_BUFFER_SIZE/2];
+const int SAMPLE_BUFFER_SIZE = 1024;
+uint16_t sampleBuffer0[SAMPLE_BUFFER_SIZE/2];
+uint16_t sampleBuffer1[SAMPLE_BUFFER_SIZE/2];
 volatile bool writeBuffer1 = false;
 SemaphoreHandle_t sampleBufferSemaphore; 
 
 int westDetect_G;
 int eastDetect_G;
 
-//#define TESTING
+// #define TESTING
 
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
@@ -101,7 +101,7 @@ int eastDetect_G;
   uint32_t stepSizes[12];
 
   // stores sine wave with SINE_RESOLUTION x-values with amplitude -2048 to 2048
-  const int SINE_RESOLUTION_BITS = 12;
+  const int SINE_RESOLUTION_BITS = 10;
   const int SINE_RESOLUTION = 1 << SINE_RESOLUTION_BITS;  // 2^SINE_RESOLUTION_BITS
 
   int sineLookup[SINE_RESOLUTION]; // populated in setup, only read from SampleISR
@@ -313,59 +313,6 @@ void sendStereoBalance(int stereoBalance)
   xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
 }
 
-// sets speaker voltage 22,000 times per sec
-// TODO: read systate and currentStepSize atomically
-// void sampleISR()
-// {
-//     static uint32_t phaseAcc[CHANNELS * 2] = {0};
-//     int16_t Vout = 0;
-//     int waveType = waveKnob.getValue();
-
-//     // play drum overlay
-//     if (InstrumentKnob.getValue() == 0)
-//     {
-//       Vout = drum();
-//     }
- 
-//     for (int i = 0; i < CHANNELS * 2; i++)
-//     {
-//       if (currentStepSize[i] == 0) { continue; };
-
-//       phaseAcc[i] += currentStepSize[i];
-//       int16_t v_delta = 0;
-
-//       // Generate waveform based on waveType
-//       if (waveType == 0) // Sawtooth Wave
-//       {
-//           v_delta = (phaseAcc[i] >> 20) - 2048;
-//       }
-//       else if (waveType == 1) // Sine Wave
-//       {
-//           int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
-//           v_delta = sineLookup[angle];
-//       }
-//       else if (waveType == 2) // Square Wave
-//       {
-//           v_delta = (phaseAcc[i] > (1 << 31)) ? 2047 : -2048;
-//       }
-
-//       // Apply damper effect
-//       float newValue = 1.0f - (channelTimes[i] * (1.0f / DAMPER_RESOLUTION));
-//       v_delta *= newValue;
-
-//       Vout += v_delta;
-//     }
-    
-//     // Apply volume control using logarithmic tapering
-//     Vout = Vout >> (8 - volumeKnob.getValue());
-
-//     // Ensure Vout stays within 0-4095 range for 12-bit DAC
-//     Vout = constrain(Vout + 2048, 0, 4095);
-    
-//     // write DAC
-//     HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, Vout);
-// }
-
 void sampleISR()
 {
   static uint32_t readCtr = 0;
@@ -390,17 +337,17 @@ void sampleISR()
 // attach/detach sampling ISR
 void toggleSampleISR(bool on)
 {
-  // if(on)
-  // { 
-  //   // initialise sampling interrupt (22,000 times a sec)
-  //   sampleTimer.setOverflow(22000, HERTZ_FORMAT);
-  //   sampleTimer.attachInterrupt(sampleISR);
-  //   sampleTimer.resume();
-  // }
-  // else
-  // {
-  //   sampleTimer.detachInterrupt();
-  // }
+  if(on)
+  { 
+    // initialise sampling interrupt (22,000 times a sec)
+    sampleTimer.setOverflow(22000, HERTZ_FORMAT);
+    sampleTimer.attachInterrupt(sampleISR);
+    sampleTimer.resume();
+  }
+  else
+  {
+    sampleTimer.detachInterrupt();
+  }
 }
 
 // task to check handshake inputs every 20ms
@@ -622,7 +569,7 @@ void scanKeysTask(void * pvParameters)
 
     readJoystick(&joystick_horiz, &joystick_vert);
     // TODO: needs bigger deadzone
-    joystick_horiz = 0;
+    // joystick_horiz = 0;
     joystick_vert = 0;
 
     if(joystick_horiz != last_joystick_horiz)
@@ -708,6 +655,8 @@ void scanKeysTask(void * pvParameters)
       // if keyIndex is NOT in localKeys itss released
       if (localKeys.find(keyIndex) == localKeys.end())
       {
+        // keyPressedLocal[i] = (octave << 8) & keyIndex;
+        // releaseTimes[i] = channelTimes[i];
         if(sysState.sender)
         {
           sendKeyPress('R', octave, keyIndex);
@@ -747,20 +696,20 @@ void scanKeysTask(void * pvParameters)
 
     __atomic_store_n(&sysState.waveType, knob2.getValue(), __ATOMIC_RELAXED);
     __atomic_store_n(&sysState.octave, knob3.getValue(), __ATOMIC_RELAXED);
-    __atomic_store_n(&sysState.volume, knob4.getValue(), __ATOMIC_RELAXED);
 
-
+    if(sysState.stereo == false)
+    {
+      __atomic_store_n(&sysState.volume, knob4.getValue(), __ATOMIC_RELAXED);
+    }
+    
     // manage sending octave change messages
     octave = sysState.octave;
-    // Serial.println(octave);
     if(lastOctave == -1)
     {
       lastOctave = octave;
     }
-
     if(octave != lastOctave)
     {
-      Serial.println("change octave!");
       if(sysState.octaveOverride)
       {
         sysState.octaveOverride = false; // reset flag
@@ -780,28 +729,37 @@ void scanKeysTask(void * pvParameters)
     // }
 
     // store key presses in sysState and manage reverb
-    for(int i = 0; i < 2*CHANNELS; i++)
+    for(int i = 0; i < CHANNELS; i++)
     {
-      // key is off
-      // KEY IS TURNED OFF IN ADSR FUNCTION!
-      if(keyPressedLocal[i] == 0xFFFF)
+
+
+      sysState.keyPressed[i] = keyPressedLocal[i];
+
+      if((channelTimes[i] - releaseTimes[i]) > 100)
       {
-        // new release
-        if(sysState.keyPressed[i] != 0xFFFF)
-        {
-          if(releaseTimes[i] == 0)
-          {
-            releaseTimes[i] = channelTimes[i];
-            Serial.println("release");
-          }
-        }
+        sysState.keyPressed[i] = 0xFFFF;
       }
 
-      // key is on
-      else
-      {
-        sysState.keyPressed[i] = keyPressedLocal[i];
-      }
+      // // key is off
+      // // KEY IS TURNED OFF IN ADSR FUNCTION!
+      // if(keyPressedLocal[i] == 0xFFFF)
+      // {
+      //   // new release
+      //   if(sysState.keyPressed[i] != 0xFFFF)
+      //   {
+      //     if(releaseTimes[i] == 0)
+      //     {
+      //       releaseTimes[i] = channelTimes[i];
+      //       Serial.println("release");
+      //     }
+      //   }
+      // }
+
+      // // key is on
+      // else
+      // {
+      //   sysState.keyPressed[i] = keyPressedLocal[i];
+      // }
 
       // if(keyPressedLocal[i] != 0xFFFF)
       // {
@@ -1005,7 +963,7 @@ void TaskMonitor(void *pvParameters) {
 int attackTime = 0;    
 int decayTime = 0;     
 float sustainLevel = 1; // number from 0 to 1
-int releaseTime = 0;  
+int releaseTime = 100;  
 
 // TODO: currently take 2ms!!! // make faster
 float applyADSR(int i)
@@ -1020,14 +978,14 @@ float applyADSR(int i)
     float_envelope = (sustainLevel) - (sustainLevel * ((currentTime - releaseTimes[i]))/(releaseTime));
     // float_envelope = (float)envelope / 100;
     
-    if((channelTimes[i] - releaseTimes[i]) > releaseTime)
-    {
-      float_envelope = 0;
-      // turn key off
-      // TODO: does keyPressed and releaseTimes need atomic access?
-      sysState.keyPressed[i] = 0xFFFF;
-      releaseTimes[i] = 0;
-    }
+    // if((channelTimes[i] - releaseTimes[i]) > releaseTime)
+    // {
+    //   float_envelope = 0;
+    //   // turn key off
+    //   // TODO: does keyPressed and releaseTimes need atomic access?
+    //   sysState.keyPressed[i] = 0xFFFF;
+    //   releaseTimes[i] = 0;
+    // }
   }
   else
   {
@@ -1061,8 +1019,8 @@ void genBufferTask(void *pvParameters)
 {
   // only 1 channel
   uint32_t phaseAcc[CHANNELS * 2] = {0};
-  uint16_t Vout = 0; //Calculate one sample
-  uint16_t v_delta = 0;
+  int Vout = 0; //Calculate one sample
+  int v_delta = 0;
   uint32_t lfoPhaseAcc = 0;
   bool activeKeys;
 
@@ -1071,7 +1029,6 @@ void genBufferTask(void *pvParameters)
     xSemaphoreTake(sampleBufferSemaphore, portMAX_DELAY);
     int waveType = sysState.waveType;
     
-
     for (uint32_t writeCtr = 0; writeCtr < SAMPLE_BUFFER_SIZE/2; writeCtr++)
     {
       v_delta = 0;
@@ -1080,11 +1037,10 @@ void genBufferTask(void *pvParameters)
       activeKeys = false;
 
       // loop through internal channels
-      for (int i = 0; i < CHANNELS; i++)
+      for (int i = 0; i < 2*CHANNELS; i++)
       {
         if (currentStepSize[i] == 0) { continue; };
 
-        
         activeKeys = true;
 
         // Generate waveform based on waveType
@@ -1105,6 +1061,11 @@ void genBufferTask(void *pvParameters)
           uint32_t index = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & (SINE_RESOLUTION - 1);  
           v_delta = sineLookup[index];
 
+        
+          // if(i==0)
+          // {
+          //   Serial.println(index);
+          // }
         }
         else if (waveType == 2) // Square Wave
         {
@@ -1115,8 +1076,8 @@ void genBufferTask(void *pvParameters)
         // float newValue = 1.0f - (channelTimes[i] * (1.0f / DAMPER_RESOLUTION));
         // v_delta *= newValue;
 
-        Vout += v_delta * applyADSR(i);
-        //Vout += v_delta;
+        //Vout += v_delta * applyADSR(i);
+        Vout += v_delta;
       }
       
 
@@ -1129,8 +1090,6 @@ void genBufferTask(void *pvParameters)
         // Vout += v_delta;
       }
 
-
-
       // Apply volume control using logarithmic tapering
       Vout = Vout >> (12 - sysState.volume);
       // Vout = Vout;
@@ -1141,7 +1100,7 @@ void genBufferTask(void *pvParameters)
       // }
 
       // Vout = constrain(Vout + 2048, 0, 4095);
-      // Vout += 2048;
+      Vout += 2048;
       // if (Vout > 4095) Vout = 4095;
       // if (Vout < 0) Vout = 0;
 
@@ -1204,7 +1163,7 @@ void MX_TIM2_Init(void)
     htim2.Instance = TIM2;
     htim2.Init.Prescaler = 0;  // 1 MHz tick
     htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim2.Init.Period = 100;  // Adjust for waveform frequency
+    htim2.Init.Period = 44;  // Adjust for waveform frequency
     htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
     htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
 
@@ -1330,14 +1289,14 @@ void setup()
  // init();
 
   //MX_GPIO_Init();
-  MX_DMA_Init();
+  // MX_DMA_Init();
   MX_DAC_Init();
   MX_TIM2_Init();
   MX_ADC1_Init();
   
   // Enable Timer interrupt (TIM7)
-  HAL_NVIC_SetPriority(TIM2_IRQn, 0, 1);
-  HAL_NVIC_EnableIRQ(TIM2_IRQn);
+  // HAL_NVIC_SetPriority(TIM2_IRQn, 0, 1);
+  // HAL_NVIC_EnableIRQ(TIM2_IRQn);
 
   HAL_TIM_Base_Start(&htim2);
   TIM2->EGR |= TIM_EGR_UG;
@@ -1442,7 +1401,7 @@ void setup()
       float angle = (2.0f * M_PI * phase) / SINE_RESOLUTION;
 
       // Scale sine value to fit int16_t range (-2048 to 2047)
-      sineLookup[phase] = static_cast<int16_t>(std::round(std::sin(angle) * 2047.0f));
+      sineLookup[phase] = static_cast<int16_t>(std::round(std::sin(angle) * 2047));
   }
 
   //Set pin directions
@@ -1495,9 +1454,6 @@ void setup()
 
   CAN_Start();
 
-  sampleTimer.setOverflow(22000, HERTZ_FORMAT);
-  sampleTimer.attachInterrupt(sampleISR);
-  sampleTimer.resume();
 
   #ifndef TESTING
   // start RTOS scheduler
