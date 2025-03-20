@@ -224,16 +224,32 @@ void receiveCanTask(void * pvParameters)
       // key press
       if(RX_Message[0] == 'P')
       {
+        bool found = false;
+        // prevents repeat key presses
         for(int i = CHANNELS; i < 2*CHANNELS; i++)
         {
-          // can only play if we have available channels
-          if(sysState.keyPressed[i] == 0xFFFF)
+          if(((octave << 8) & key) == sysState.keyPressed[i])
           {
-            __atomic_store_n(&channelTimes[CHANNELS + i], 0, __ATOMIC_RELAXED);
-            sysState.keyPressed[i] = (octave << 8) | key;
-            break;
+            found = true;
           }
-        } 
+        }
+        if(found == false)
+        {
+          for(int i = CHANNELS; i < 2*CHANNELS; i++)
+          {
+            // can only play if we have available channels
+            if(sysState.keyPressed[i] == 0xFFFF)
+            {
+              __atomic_store_n(&channelTimes[CHANNELS + i], 0, __ATOMIC_RELAXED);
+              sysState.keyPressed[i] = (octave << 8) | key;
+              Serial.print("P");
+              Serial.print(octave);
+              Serial.print(key);
+              Serial.print("\n");
+              break;
+            }
+          } 
+        }  
       }
 
       // key release
@@ -241,10 +257,11 @@ void receiveCanTask(void * pvParameters)
       {
         for(int i = CHANNELS; i < 2*CHANNELS; i++)
         {
-          if(sysState.keyPressed[i] == (octave << 8) | key)
+
+          if(sysState.keyPressed[i] == ((octave << 8) | key))
           {
-            sysState.keyPressed[i] = 0xFFFF;
-            break;
+
+            __atomic_store_n(&sysState.keyPressed[i], 0xFFFF, __ATOMIC_RELAXED);
           }
         } 
       }
@@ -283,6 +300,10 @@ void sendKeyPress(char action, int octave, int keyPressed)
   TX_Message[0] = action;
   TX_Message[1] = octave;
   TX_Message[2] = keyPressed;
+  Serial.print(action);
+  Serial.print(octave);
+  Serial.print(keyPressed);
+  Serial.print("\n");
   xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
 }
 
@@ -640,7 +661,6 @@ void scanKeysTask(void * pvParameters)
     for(int i = 0; i < CHANNELS; i++){ sysState.keyPressed[i] = 0x0000;}
     #endif
 
-
     // check for key releases
     std::unordered_set<uint8_t> localKeys; // cache key indexes for quick lookup
     for (int j = 0; j < CHANNELS; j++)
@@ -670,6 +690,7 @@ void scanKeysTask(void * pvParameters)
     {
       activeKeys.insert(sysState.keyPressed[j] & 0xFF);
     }
+
     for (int i = 0; i < CHANNELS; i++)
     {
       if (keyPressedLocal[i] == 0xFFFF) continue;  // skip empty keys
@@ -723,22 +744,15 @@ void scanKeysTask(void * pvParameters)
       }
     }
 
-    // if(!sysState.stereo) // no knob volume control in stereo mode
-    // {
-      
-    // }
-
     // store key presses in sysState and manage reverb
     for(int i = 0; i < CHANNELS; i++)
     {
-
-
       sysState.keyPressed[i] = keyPressedLocal[i];
 
-      if((channelTimes[i] - releaseTimes[i]) > 100)
-      {
-        sysState.keyPressed[i] = 0xFFFF;
-      }
+      // if((channelTimes[i] - releaseTimes[i]) > 100)
+      // {
+      //   sysState.keyPressed[i] = 0xFFFF;
+      // }
 
       // // key is off
       // // KEY IS TURNED OFF IN ADSR FUNCTION!
@@ -928,6 +942,8 @@ void sendCanTask (void * pvParameters) {
 
 		CAN_TX(0x123, msgOut);
 
+    HAL_Delay(100);
+
     #ifdef TESTING
     break;
     #endif
@@ -1053,33 +1069,17 @@ void genBufferTask(void *pvParameters)
         // Generate waveform based on waveType
         if (waveType == 0) // Sawtooth Wave
         {
-          
           v_delta = (phaseAcc[i] >> 20) - 2048;
         }
         else if (waveType == 1) // Sine Wave
         {
-          // // int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
-          // // int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & ((1 << SINE_RESOLUTION_BITS) - 1);
-          // int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF;
-          // v_delta = sineLookup[angle];
-          
           uint32_t index = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & (SINE_RESOLUTION - 1);  
           v_delta = sineLookup[index];
-
-        
-          // if(i==0)
-          // {
-          //   Serial.println(index);
-          // }
         }
         else if (waveType == 2) // Square Wave
         {
           v_delta = (phaseAcc[i] > (1 << 31)) ? 2047 : -2048;
         }
-
-        // // Apply damper effect
-        // float newValue = 1.0f - (channelTimes[i] * (1.0f / DAMPER_RESOLUTION));
-        // v_delta *= newValue;
 
         //Vout += v_delta * applyADSR(i);
         Vout += v_delta;
@@ -1087,14 +1087,12 @@ void genBufferTask(void *pvParameters)
       
       // Apply volume control using logarithmic tapering
       Vout = Vout >> (12 - sysState.volume);
-      // Vout = Vout;
 
       // Normalize the volume when multiple keys are pressed
       // if (activeKeys > 0) {
       //   Vout /= activeKeys;
       // }
 
-      // Vout = constrain(Vout + 2048, 0, 4095);
       Vout += 2048;
       // if (Vout > 4095) Vout = 4095;
       // if (Vout < 0) Vout = 0;
