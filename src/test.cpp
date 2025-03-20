@@ -89,7 +89,7 @@ void test_genBufferTask()
     uint32_t startTime = micros();
     for (int iter = 0; iter < 32; iter++)
     {
-      // xSemaphoreGive(sampleBufferSemaphore);
+      xSemaphoreGive(sampleBufferSemaphore);
       genBufferTask(NULL);
     }
 

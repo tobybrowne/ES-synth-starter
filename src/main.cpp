@@ -34,7 +34,7 @@ uint8_t sampleBuffer1[SAMPLE_BUFFER_SIZE/2];
 volatile bool writeBuffer1 = false;
 SemaphoreHandle_t sampleBufferSemaphore; 
 
-// #define TESTING
+#define TESTING
 
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
@@ -515,7 +515,6 @@ void checkHandshakeTask(void * pvParameters)
       octaveKnob.setValue(sysState.BOARD_ID);
       sysState.octaveOverride = true;
   
-
       // send board it's new ID
       // TODO: need to get rid of this
       // delay(500);
@@ -970,27 +969,29 @@ void TaskMonitor(void *pvParameters) {
 
 // need to test different parameters for this
 // piano? / strings / guitar / drums
-float attackTime = 20;    
-float decayTime = 20;     
+int attackTime = 20;    
+int decayTime = 20;     
 float sustainLevel = 1; // number from 0 to 1
-float releaseTime = 200;   
+int releaseTime = 200;  
 
+// TODO: currently take 2ms!!! // make faster
 float applyADSR(int i)
 {
   unsigned long currentTime = channelTimes[i];  
-  float envelope = 0;
+  int envelope = 0;
+  float float_envelope = 0;
 
   // key is in release stage
-  if(releaseTimes[i] !=0 )
+  if(releaseTimes[i] > 0 )
   {
-    int scaled_sustain = 100*sustainLevel;
-    envelope = (scaled_sustain) - (scaled_sustain * ((currentTime - releaseTimes[i])*100)/(releaseTime*100));
-    envelope = envelope / 100;
-    if(envelope < 0.01)
+    float_envelope = (sustainLevel) - (sustainLevel * ((currentTime - releaseTimes[i]))/(releaseTime));
+    // float_envelope = (float)envelope / 100;
+    
+    if(float_envelope < 0.01)
     {
       // turn key off
       // TODO: does keyPressed and releaseTimes need atomic access?
-      sysState.keyPressed[i] = 0xFFFF;
+      __atomic_store_n(&sysState.keyPressed[i], 0xFFFF, __ATOMIC_RELAXED);
       releaseTimes[i] = 0;
     }
   }
@@ -999,27 +1000,27 @@ float applyADSR(int i)
     // attack: increase amp gradually 
     if (currentTime < attackTime)
     {
-      envelope = (float)currentTime / attackTime;  
+      float_envelope = (float)currentTime / attackTime;  
     }
     // decay: decrease to sustain amp
     else if (currentTime < attackTime + decayTime)
     {
-      float decayProgress = (float)(currentTime - attackTime) / decayTime;
-      envelope = 1 - (1 - sustainLevel) * decayProgress;  
+      int decayProgress = currentTime - attackTime;
+      return 1.0f - (1.0f - sustainLevel) * ((float)decayProgress / decayTime);
     }
     // sustain 
     else
     {
-      envelope = sustainLevel;
+      float_envelope = sustainLevel;
     }
   }
 
-
   // Ensure envelope stays within bounds (0 to 1)
-  if(envelope > 1) envelope = 1;
-  if(envelope < 0) envelope = 0;
-  return envelope;
+  if(float_envelope > 1) float_envelope = 1;
+  if(float_envelope < 0) float_envelope = 0;
+  return float_envelope;
 }
+
 
 // auto writes when buffer is available
 void genBufferTask(void *pvParameters)
@@ -1323,7 +1324,7 @@ void setup()
   xTaskCreate(
   displayUpdateTask,		/* Function that implements the task */
   "displayUpdate",		/* Text name for the task */
-  256,      		/* Stack size in words, not bytes */
+  512,      		/* Stack size in words, not bytes */
   NULL,			/* Parameter passed into the task */
   1,			/* Task priority */
   &displayUpdate );	/* Pointer to store the task handle */
@@ -1434,20 +1435,20 @@ void setup()
   sampleTimer.attachInterrupt(sampleISR);
   sampleTimer.resume();
 
-
-
   #ifndef TESTING
   // start RTOS scheduler
   vTaskStartScheduler();
   #endif
 
   #ifdef TESTING
+  Serial.println("========== START TESTING ==========");
   test_sampleISR();
   test_receiveCanTask();
   test_displayUpdateTask();
-  // test_sendCanTask();
+  //test_sendCanTask();
   test_scanKeysTask();
   test_genBufferTask();
+  Serial.println("========== END TESTING ==========");
   //test_checkHandshakeTask();
   #endif
 }
