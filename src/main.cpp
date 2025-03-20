@@ -34,7 +34,10 @@ uint8_t sampleBuffer1[SAMPLE_BUFFER_SIZE/2];
 volatile bool writeBuffer1 = false;
 SemaphoreHandle_t sampleBufferSemaphore; 
 
-#define TESTING
+int westDetect_G;
+int eastDetect_G;
+
+//#define TESTING
 
 // WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
 // HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
@@ -429,6 +432,9 @@ void checkHandshakeTask(void * pvParameters)
     westDetect = !sysState.inputs[23];
     eastDetect = !sysState.inputs[27];
 
+    westDetect_G = westDetect;
+    eastDetect_G = eastDetect;
+
     // // east LOW to HIGH
     // if(lastEast == 0 && eastDetect == 1)
     // {
@@ -455,7 +461,7 @@ void checkHandshakeTask(void * pvParameters)
     //   //   sendID(sysState.BOARD_ID+1);
     //   // }
     // }
-    // // east HIGH to LOW
+    // east HIGH to LOW
     // else if(lastEast == 1 && eastDetect == 0)
     // { 
     //   // keyboard on right removed
@@ -497,7 +503,7 @@ void checkHandshakeTask(void * pvParameters)
       //  TODO: how do we characterise this in a test?
       // TODO: could probably remove this (or shorten it) if CAN_RX was a higher priority
       #ifndef TESTING
-      vTaskDelay(pdMS_TO_TICKS(150));
+      vTaskDelay(pdMS_TO_TICKS(250));
       #endif
 
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);
@@ -529,7 +535,7 @@ void checkHandshakeTask(void * pvParameters)
         }
         
         // send a "end handshake" CAN message
-        // sendEndHandshake();
+        sendEndHandshake();
 
         // in stereo mode both left and right boards receive
         if(sysState.stereo)
@@ -886,6 +892,7 @@ void displayUpdateTask(void * pvParameters)
     u8g2.print("Oct: ");
     u8g2.print(octaveKnob.getValue());
 
+
     // display wave type of current keyboard
     textWidth = u8g2.getStrWidth("Wave: ") + u8g2.getStrWidth(waveTypes[sysState.waveType]);
     u8g2.setCursor(displayWidth - textWidth, 20);
@@ -908,6 +915,11 @@ void displayUpdateTask(void * pvParameters)
     u8g2.print((char) RX_Message_Temp[0]);
     u8g2.print(RX_Message_Temp[1]);
     u8g2.print(RX_Message_Temp[2]);
+
+    // display last received CAN message
+    u8g2.setCursor(90,30);
+    u8g2.print(westDetect_G);
+    u8g2.print(eastDetect_G);
 
     if(sysState.handshakePending)
     {
@@ -1448,8 +1460,9 @@ void setup()
   //test_sendCanTask();
   test_scanKeysTask();
   test_genBufferTask();
+  test_checkHandshakeTask();
   Serial.println("========== END TESTING ==========");
-  //test_checkHandshakeTask();
+
   #endif
 }
 
