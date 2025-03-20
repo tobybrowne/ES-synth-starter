@@ -30,7 +30,7 @@ int westDetect_G = 0;
 int eastDetect_G = 0;
 
 // written to in handshake check and read from in scanKeysTask
-int outBits[7] = {0, 0, 0, 1, 1, 1, 1}; // thread-safe
+// thread-safe
   
 // constants
 const uint32_t interval = 100; //Display update interval
@@ -221,7 +221,7 @@ void receiveCanTask(void * pvParameters)
     // end of handshaking message
     else if(RX_Message[0] == 'E')
     {
-      __atomic_store_n(&outBits[6], 1, __ATOMIC_RELAXED); // turn east back on
+      sysState.outBits[6] = 1;  // turn east back on
     }
 
     // if receiver...
@@ -372,7 +372,7 @@ void checkHandshakeTask(void * pvParameters)
   int lastSender = -1;
 
   #ifndef TESTING
-  const TickType_t xFrequency = 150/portTICK_PERIOD_MS;
+  const TickType_t xFrequency = 200/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
   #endif
 
@@ -399,7 +399,7 @@ void checkHandshakeTask(void * pvParameters)
       if(sysState.BOARD_ID != -1)
       {
         // turn east off
-        __atomic_store_n(&outBits[6], 0, __ATOMIC_RELAXED);
+        sysState.outBits[6] = 0;
         setOutMuxBit(HKOE_BIT, LOW);
 
         // break for 250ms secs to allow east signal to propagate
@@ -425,7 +425,7 @@ void checkHandshakeTask(void * pvParameters)
     if((lastWest == 1 && westDetect == 0) || (lastWest == -1 && westDetect == 0))
     {
       // turn east off
-      __atomic_store_n(&outBits[6], 0, __ATOMIC_RELAXED);
+      sysState.outBits[6] = 0;
       setOutMuxBit(HKOE_BIT, LOW);
 
       // wait for 250ms for CAN message to be received
@@ -586,7 +586,7 @@ void scanKeysTask(void * pvParameters)
     for(int i = 0; i < 8; i++)
     {
       setRow(i);
-      if(i < 7) { digitalWrite(OUT_PIN, outBits[i]); } // reset MUX bits
+      if(i < 7) { digitalWrite(OUT_PIN, sysState.outBits[i]); } // reset MUX bits
       delayMicroseconds(3);
       std::bitset<4> columns = readCols();
       int start_id = i * 4;

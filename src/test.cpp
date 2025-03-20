@@ -83,6 +83,7 @@ void test_genBufferTask()
     {
         currentStepSize[i] = stepSizes[0]; // every channel is playing a C note
         channelTimes[i] = 10; // midway through it's press
+        sysState.waveType = 1;
     }
 
     // benchmark
@@ -107,8 +108,9 @@ void test_receiveCanTask()
   // define 32 input messages
   msgInQ = xQueueCreate(32,8);
   uint8_t RX_Message_ISR[8];
-  RX_Message_ISR[0] = 'O';
+  RX_Message_ISR[0] = 'R';
   RX_Message_ISR[1] = 1;
+  RX_Message_ISR[2] = 1;
   for(int i = 0; i < 32; i++)
   {
     xQueueSend(msgInQ, RX_Message_ISR, NULL);

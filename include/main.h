@@ -24,6 +24,8 @@ struct SysState
     bool rightBoard = false;
     int BOARD_ID;
 
+    int outBits[7] = {0, 0, 0, 1, 1, 1, 1}; 
+
     int ID_RECV = -1;
 
     int startOctave = 3;
