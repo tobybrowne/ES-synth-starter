@@ -815,6 +815,123 @@ void scanKeysTask(void * pvParameters)
   } 
 }
 
+const uint8_t musical_note_bitmap[] = {
+  0b00011000,  //    **  
+  0b00100100,  //   *  * 
+  0b01000010,  //  *    *
+  0b10000001,  // *      *
+  0b10000001,  // *      *
+  0b01000010,  //  *    *
+  0b00100100,  //   *  * 
+  0b00011000   //    **
+};
+
+void drawNote(){
+  u8g2.drawPixel(7, 1);
+  u8g2.drawPixel(7, 2);
+  u8g2.drawPixel(8, 2);
+  u8g2.drawPixel(7, 3);
+  u8g2.drawPixel(9, 3);
+  u8g2.drawPixel(7, 4);
+  u8g2.drawPixel(7, 5);
+  u8g2.drawPixel(3, 6);
+  u8g2.drawPixel(4, 6);
+  u8g2.drawPixel(5, 6);
+  u8g2.drawPixel(6, 6);
+  u8g2.drawPixel(7, 6);
+  u8g2.drawPixel(2, 7);
+  u8g2.drawPixel(3, 7);
+  u8g2.drawPixel(4, 7);
+  u8g2.drawPixel(5, 7);
+  u8g2.drawPixel(6, 7);
+  u8g2.drawPixel(7, 7);
+  u8g2.drawPixel(2, 8);
+  u8g2.drawPixel(3, 8);
+  u8g2.drawPixel(4, 8);
+  u8g2.drawPixel(5, 8);
+  u8g2.drawPixel(6, 8);
+  u8g2.drawPixel(7, 8);
+  u8g2.drawPixel(3, 9);
+  u8g2.drawPixel(4, 9);
+  u8g2.drawPixel(5, 9);
+}
+
+void drawWaves(int wave) {
+  int startX = 2;   // Starting X position
+  int startY = 12;  // Starting Y position
+  int height = 9;   // Height of the wave
+  int width = 60;   // Width for 4 full waves
+  int waveLength = width / 4;  // Since we want 4 cycles
+  if (wave == 0) {
+    // sawtooth Wave
+    u8g2.drawLine(2, 20, 17, 12);
+    u8g2.drawLine(17, 12, 17, 20);
+  
+    u8g2.drawLine(17, 20, 32, 12);
+    u8g2.drawLine(32, 12, 32, 20);
+  
+    u8g2.drawLine(32, 20, 47, 12);
+    u8g2.drawLine(47, 12, 47, 20);
+  
+    u8g2.drawLine(47, 20, 62, 12);
+    u8g2.drawLine(62, 12, 62, 20);
+  }
+
+  if(wave == 1) {
+    int tmp;
+    // Sine Wave 
+    for(int i = 0; i < 4; i++){
+      tmp = i * 15;
+      u8g2.drawPixel(2 + tmp, 16);
+      u8g2.drawPixel(2 + tmp, 15);
+      u8g2.drawPixel(3 + tmp, 14);
+      u8g2.drawPixel(3 + tmp, 13);
+
+      u8g2.drawPixel(4 + tmp, 12);
+      u8g2.drawPixel(5 + tmp, 12);
+      u8g2.drawPixel(6 + tmp, 12);
+      u8g2.drawPixel(7 + tmp, 12);
+
+      u8g2.drawPixel(8 + tmp, 13);
+      u8g2.drawPixel(8 + tmp, 14);
+      u8g2.drawPixel(9 + tmp, 15);
+      u8g2.drawPixel(9 + tmp, 16);
+      u8g2.drawPixel(10 + tmp, 17);
+      u8g2.drawPixel(10 + tmp, 17);
+      u8g2.drawPixel(11 + tmp, 18);
+      u8g2.drawPixel(11 + tmp, 19);
+
+      u8g2.drawPixel(12 + tmp, 20);
+      u8g2.drawPixel(12 + tmp, 20);
+      u8g2.drawPixel(13 + tmp, 20);
+      u8g2.drawPixel(14 + tmp, 20);
+
+      u8g2.drawPixel(15 + tmp, 19);
+      u8g2.drawPixel(15 + tmp, 18);
+      u8g2.drawPixel(16 + tmp, 17);
+      u8g2.drawPixel(16 + tmp, 16);
+      u8g2.drawPixel(17 + tmp, 15);
+      u8g2.drawPixel(17 + tmp, 14);
+    }
+  }
+  
+  if (wave == 2) {
+    // square Wave
+    u8g2.drawLine(2, 20, 17, 20);
+    u8g2.drawLine(17, 20, 17, 12);
+  
+    u8g2.drawLine(17, 12, 32, 12);
+    u8g2.drawLine(32, 20, 32, 12);
+  
+    u8g2.drawLine(32, 20, 47, 20);
+    u8g2.drawLine(47, 20, 47, 12);
+  
+    u8g2.drawLine(47, 12, 62, 12);
+    u8g2.drawLine(62, 20, 62, 12);
+  }
+}
+
+
 // task to update OLED display every 100ms
 void displayUpdateTask(void *pvParameters)
 {
@@ -841,9 +958,12 @@ void displayUpdateTask(void *pvParameters)
     u8g2.clearBuffer();         // Clear the internal memory
     u8g2.setFont(u8g2_font_ncenB08_tr); // Choose a suitable font for the top section
 
+    drawNote();
     // Display Keys and Octave at the top-left corner
-    u8g2.setCursor(2, 10);
-    u8g2.print("Keys: ");
+    u8g2.setCursor(12, 10);
+    //u8g2.drawXBM(2, 10, 8, 8, musical_note_bitmap);
+    u8g2.print(": ");
+
     for (int i = 0; i < CHANNELS; i++) {
       if (sysState.keyPressed[i] != 0xFFFF) {
         u8g2.print(keyNames[sysState.keyPressed[i] & 0xFF]);
@@ -858,19 +978,25 @@ void displayUpdateTask(void *pvParameters)
 
     // Display Wave type (Saw, Sine, Square)
     u8g2.setCursor(2, 20);
-    u8g2.print("Wave: ");
-    u8g2.print(waveTypes[sysState.waveType]);
+
+    drawWaves(sysState.waveType);
+    // u8g2.print("Wave: ");
+    // u8g2.print(waveTypes[sysState.waveType]);
 
     // Display Volume on the right
     u8g2.setCursor(85, 10);
-    u8g2.print("VOL: ");
+    u8g2.print("Vol: ");
     u8g2.print(sysState.volume);
 
     // Display the bottom grid section, labels for each knob
     int gridWidth = 128 / 4;  // Divide the width into 4 sections
 
-    // Draw grid border higher up
-    u8g2.drawFrame(0, 24, 128, 8); // Draw a box that will represent the bottom grid, moved up
+    u8g2.drawFrame(0, 22, 128, 9);  // Move the box up by 2 pixels
+
+    // Draw 3 vertical lines to separate the sections, adjusted for the new box position
+    u8g2.drawLine(gridWidth, 22, gridWidth, 30);  // First vertical line
+    u8g2.drawLine(2 * gridWidth, 22, 2 * gridWidth, 30);  // Second vertical line
+    u8g2.drawLine(3 * gridWidth, 22, 3 * gridWidth, 30);
 
     // Use a smaller font for the labels in the grid
     u8g2.setFont(u8g2_font_5x8_tr);  // Smaller font for the labels at the bottom
