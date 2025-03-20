@@ -1,5 +1,17 @@
 # Embedded Systems Synth Project
 
+## Features
+- 10 Channel Polyphony
+- Customisable ADSR Envelopes
+- Joystick Controlled Whammy Bar
+- CAN Keyboard Cooperation
+- Keyboard Hotswapping
+- Group Octave Control for Keyboard Groups
+- Double Buffering
+- STM32 HAL Calls for Analog Inputs and Outputs
+- Performant UI
+- Wave Selection (Sine, Square, Sawtooth)
+- 12 Bit Sound by interfacing directly with the DAC.
 
 ## Process Overviews
 
@@ -20,12 +32,14 @@ This is an RTOS task that updates the OLED display to form a user interface.
 
 The MII of this task is 100ms, as this is a sufficient frequency for a user to not notice any latency, however this task must also wait for the `sysState` semaphore before executing.
 
+ADD EXECUTION TIME
+
 ### CAN_RX_ISR
 This is an interrupt that runs whenever the device receives a CAN message. It takes the message and stores it in a global thread safe queue, for further processing in another module. This interrupt is intentionally kept as small as possible to minimise disruptions to the scheduler.
 
 The execution time of this interrupt will always be the same, as it is only called when there is a packet to process. Therefore, by filling the RX buffer with packets to process, we can easily find the execution time of this interrupt to be Xμs.
 
-The MII of this process is slightly harder to define, as it would usually depend upon the rate at which other boards transmit CAN messages. The absolute MII would likely be set by the EITHER THE MAX CAN RX RATE OR THE TIME OF THIS PROCESS, FIGURE IT OUT, WHICH IS SMALLER!
+The MII of this process is slightly harder to define, as it would usually depend upon the rate at which other boards transmit CAN messages. The absolute MII would likely be  EITHER THE MAX CAN RX RATE OR THE TIME OF THIS PROCESS, FIGURE IT OUT, WHICH IS SMALLER!
 
 ### ReceiveCanTask
 This is an RTOS task which processes the CAN messages placed in the global RX queue by CAN_RX_ISR. This system has 3 types of CAN messages, each distinguished by their first byte:
@@ -68,15 +82,40 @@ This is an interrupt that reads the amplitudes stored in the double buffer and w
 This task has a MII of 45μs, as we sample our speaker at a rate of 22kHz, and the process is so basic that it takes less than 1μs, and is reported as taking 0μs by our timing functions. As a result, we ignore the delays associated with this process.
 
 
+## Critical Instant Analysis and CPU Utilisation
+To perform a critical instant timing analysis we use the worst case execution times found earlier, and ensure that every task running can hit it's deadlines in the period of the task of least priority. In our case, the task would be `displayUpdateTask` which runs every 100ms.
 
-## Critical Instant Analysis
-
-## CPU Utilisation
+| Task Name                               | Initiation Interval (τᵢ) | Execution Time (Tᵢ) | Maximum τᵢ / τᵢ | CPU Utilisation (Tᵢ / τᵢ) |
+|-----------------------------------------|-------------------------|---------------------|---------------------------|------------------------------------|
+| sampleISR                            | 45 μs                   | 0.241 ms            | 5                         | 1.205%                             |
+| receiveCanTask                       |                         | 18.60 ms            | 1                         | 18.6%                              |
+| sendCanTask                          |                         | 0.028 ms            | 22000                     | 61.6%                              |
+| displayUpdateTask                    | 100,000 μs              | 1.116 ms            | 3.97                       | 4.429%                             |
+| scanKeysTask                         | 20,000 μs               | 0.360 ms            | 3.97                       | 1.429%                             |
+| genBufferTask                        | 23,000 μs               | 0.432 ms            | 1.67                       | 0.72%                              |
+| checkHandshakeTask                   | 200,000 μs              | 0.187 ms            | 1.67                       | 0.312%                             |
+| CAN_RX_ISR                           |                         | 0.187 ms            | 1.67                       | 0.312%                             |
+| CAN_TX_ISR                           |                         | 0.187 ms            | 1.67                       | 0.312%                             |
+| *Total*                              |                         |                     |                           | *88.295%*                        |
 
 ## Shared Data Structures and Synchronisation
+The program makes use of the following shared data structures:
 
+- `sysState` Semaphore: This stores most of the crucial state information for the board including it's volume, octave, keys pressed as well as arrays like `outBit` which benefit from the synchronisation provided. The `receiveCanTask`, `checkHandshakeTask`, `scanKeysTask` and `displayUpdateTask` all require posession of this lock before they can execute, ensuring that many of these key processes do not interrupt each other. Unlike the lab demonstrations, there are no instances in which the attributes of the `sysState` object are modified in a process without access to the mutex.
 
-## Inter-Task Dependencies and Blocking
+- `sampleBufferX`: These buffers hold the amplitudes to be played in the near future. This is written to by `genBufferTask` and read from by `sampleISR`. A semaphore tells `genBufferTask` when it is allowed to write and `writeBuffer1` tells it to which buffer. This ensures we never have to processes reading and writing to the same memory.
+
+- `msgInQ` `msgOutQ`: We use `QueueHandle_t` objects (which we know are thread-safe) to act as CAN RX and TX queues. These are accessed by most code related to CAN.
+
+- `Knob`: This is a class that we define to hold information about a given knob on the board. We ensure these classes are thread-safe by implementing all of it's methods using atomic operations (this is feasible due to the class's simplicity).
+
+- `currentStepSize`: This is a 32-bit integer array that stores the step size associated with each of the channels. This is written to by many processes across the program, every time atomically.
+
+- `channelTimes`: This is a 32-bit integer array that stores the time steps since a key was pressed. This allows us to implement effects like ADSR. Again, we only write to this atomically.
+
+- `adsrLookup`: This is a float array storing the envelope for the current ADSR parameters. This must be modified is `scanKeysTask` whenever the ADSR parameters are changed and read inside of `genBuffTask`, to ensure no partial reads occur, since these tasks need to overlap, we use an RTOS critical path to wrap the writes to the memory space, ensuring they are not interrupted.
+
+## Inter-Task Dependencies and Deadlocking
 
 
 
