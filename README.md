@@ -37,9 +37,9 @@ ADD EXECUTION TIME
 ### CAN_RX_ISR
 This is an interrupt that runs whenever the device receives a CAN message. It takes the message and stores it in a global thread safe queue, for further processing in another module. This interrupt is intentionally kept as small as possible to minimise disruptions to the scheduler.
 
-The execution time of this interrupt will always be the same, as it is only called when there is a packet to process. Therefore, by filling the RX buffer with packets to process, we can easily find the execution time of this interrupt to be Xμs.
+The execution time of this interrupt will always be the same, as it is only called when there is a packet to process. Therefore, by filling the RX buffer with packets to process, we can easily find the execution time of this interrupt to be 11μs.
 
-The MII of this process is slightly harder to define, as it would usually depend upon the rate at which other boards transmit CAN messages. The absolute MII would likely be  EITHER THE MAX CAN RX RATE OR THE TIME OF THIS PROCESS, FIGURE IT OUT, WHICH IS SMALLER!
+The MII of this process is slightly harder to define, as it would usually depend upon the rate at which other boards transmit CAN messages. The absolute MII would likely be  the minimum possible period between CAN message. For our setup this is about 960μs.
 
 ### ReceiveCanTask
 This is an RTOS task which processes the CAN messages placed in the global RX queue by CAN_RX_ISR. This system has 3 types of CAN messages, each distinguished by their first byte:
@@ -57,7 +57,7 @@ We found that the most complex of these messages to process was a key release, s
 This task will only run if data exists inside the RX buffer and if the `sysState` semaphore is free. WHAT IS THE MII!!
 
 ### CAN_TX_ISR
-This in an interrupt that frees a semaphore when a CAN mailbox is available. This allows the `sendCanTask` to know when it can transmit it's messages. The timing for this process is fairly constant at about Xμs. WHAT IS THE MII!
+This in an interrupt that frees a semaphore when a CAN mailbox is available. This allows the `sendCanTask` to know when it can transmit it's messages. The timing for this process is fairly constant at about 11μs, the same as the receive interrupt. Again we can make the same assumption regarding CAN rates and say that the MII is around 960μs.
 
 ### SendCanTask
 This is an RTOS task that runs when data exists in the global CAN TX queue and when a CAN mailbox is free (indicated by the semaphore discussed previously). It takes the semaphore and then transmits the message. The execution time for this process is about Xμs. WHAT IS THE MII!
@@ -94,8 +94,8 @@ To perform a critical instant timing analysis we use the worst case execution ti
 | scanKeysTask                         | 20,000 μs               | 0.360 ms            | 3.97                       | 1.429%                             |
 | genBufferTask                        | 23,000 μs               | 0.432 ms            | 1.67                       | 0.72%                              |
 | checkHandshakeTask                   | 200,000 μs              | 0.187 ms            | 1.67                       | 0.312%                             |
-| CAN_RX_ISR                           |                         | 0.187 ms            | 1.67                       | 0.312%                             |
-| CAN_TX_ISR                           |                         | 0.187 ms            | 1.67                       | 0.312%                             |
+| CAN_RX_ISR                           | 960 μs                  | 0.187 ms            | 1.67                       | 0.312%                             |
+| CAN_TX_ISR                           | 960 μs                  | 0.187 ms            | 1.67                       | 0.312%                             |
 | *Total*                              |                         |                     |                           | *88.295%*                        |
 
 ## Shared Data Structures and Synchronisation
