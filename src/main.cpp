@@ -111,7 +111,10 @@ void generateAdsrLookup(int attackTime, int decayTime)
     if (envelope < 0) envelope = 0;
     if (envelope > SCALE) envelope = SCALE;
 
-    adsrLookup[i] = envelope * INV_SCALE; // Convert to float at the end
+    // we need to use critical paths because float writes aren't atomic
+    taskENTER_CRITICAL();
+    adsrLookup[i] = envelope * INV_SCALE; 
+    taskEXIT_CRITICAL();
   }
 }
 
