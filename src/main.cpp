@@ -71,8 +71,8 @@ int eastDetect_G;
   SysState sysState;
 
   // knob inits
-  Knob knob4 = Knob(0, 12, 5); // volume
-  Knob knob3 = Knob(0, 8, 3); //octave
+  Knob knob4 = Knob(0, 12, 7); // volume
+  Knob knob3 = Knob(0, 8, 6); // octave
   Knob knob2 = Knob(0, 2, 0); // wave
   Knob InstrumentKnob = Knob(0, 1, 1);
 
@@ -1034,7 +1034,10 @@ void genBufferTask(void *pvParameters)
       v_delta = 0;
       Vout = 0;
 
-      activeKeys = false;
+      // add LFO
+      lfoPhaseAcc += stepSizes[0];
+      int angle = (lfoPhaseAcc >> (32 - SINE_RESOLUTION_BITS)) & ((1 << SINE_RESOLUTION_BITS) - 1);
+      float vibrato = (float)sineLookup[angle] / 2048;
 
       // loop through internal channels
       for (int i = 0; i < 2*CHANNELS; i++)
@@ -1043,10 +1046,14 @@ void genBufferTask(void *pvParameters)
 
         activeKeys = true;
 
+        // uint32_t step = currentStepSize[i] * (1.0f + vibrato * 0.05f);
+        phaseAcc[i] += currentStepSize[i];
+        // phaseAcc[i] += currentStepSize[i];
+
         // Generate waveform based on waveType
         if (waveType == 0) // Sawtooth Wave
         {
-          phaseAcc[i] += currentStepSize[i];
+          
           v_delta = (phaseAcc[i] >> 20) - 2048;
         }
         else if (waveType == 1) // Sine Wave
@@ -1055,8 +1062,6 @@ void genBufferTask(void *pvParameters)
           // // int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & ((1 << SINE_RESOLUTION_BITS) - 1);
           // int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF;
           // v_delta = sineLookup[angle];
-
-          phaseAcc[i] += currentStepSize[i];
           
           uint32_t index = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & (SINE_RESOLUTION - 1);  
           v_delta = sineLookup[index];
@@ -1080,16 +1085,6 @@ void genBufferTask(void *pvParameters)
         Vout += v_delta;
       }
       
-
-      if(activeKeys)
-      {
-        // add LFO
-        // lfoPhaseAcc += stepSizes[0] << 3;
-        // int angle = (lfoPhaseAcc >> (32 - SINE_RESOLUTION_BITS)) & ((1 << SINE_RESOLUTION_BITS) - 1);
-        // v_delta = sineLookup[angle] << 6;
-        // Vout += v_delta;
-      }
-
       // Apply volume control using logarithmic tapering
       Vout = Vout >> (12 - sysState.volume);
       // Vout = Vout;
