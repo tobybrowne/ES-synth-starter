@@ -816,106 +816,88 @@ void scanKeysTask(void * pvParameters)
 }
 
 // task to update OLED display every 100ms
-void displayUpdateTask(void * pvParameters)
+void displayUpdateTask(void *pvParameters)
 {
   #ifndef TESTING
-  const TickType_t xFrequency = 200/portTICK_PERIOD_MS;
+  const TickType_t xFrequency = 200 / portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
   #endif
 
-  // strings used for display
-  const char* keyNames [12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+  // Strings used for display
+  const char* keyNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
   const char* waveTypes[3] = {"Saw", "Sine", "Square"};
   const char* instrumentTypes[2] = {"Drums", "Piano"};
 
-  while(1)
+  while (1)
   {
     #ifndef TESTING
-    // ensures we update screen every 100ms
-    vTaskDelayUntil( &xLastWakeTime, xFrequency );
+    // Ensures we update the screen every 200ms
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
     #endif
 
-    // take systate mutex
+    // Take sysState mutex
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
 
-    u8g2.clearBuffer();         // clear the internal memory
-    u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-    
-    // display notes pressed on current keyboard
-    u8g2.setCursor(2,10);
-    u8g2.print("Keys: ");
+    u8g2.clearBuffer();         // Clear the internal memory
+    u8g2.setFont(u8g2_font_ncenB08_tr); // Choose a suitable font for the top section
 
-    // Print the keys that are pressed
+    // Display Keys and Octave at the top-left corner
+    u8g2.setCursor(2, 10);
+    u8g2.print("Keys: ");
     for (int i = 0; i < CHANNELS; i++) {
       if (sysState.keyPressed[i] != 0xFFFF) {
-        
         u8g2.print(keyNames[sysState.keyPressed[i] & 0xFF]);
         u8g2.print(" ");
       }
     }
 
-    // Determine the width of the display
-    int displayWidth = u8g2.getDisplayWidth();
-    
-    int textWidth = u8g2.getStrWidth("00"); // RECV and SEND have same width
-    u8g2.setCursor(displayWidth - textWidth, 10);
-    u8g2.print(sysState.BOARD_ID);
-
-    // display octave of current keyboard
-    u8g2.setCursor(2,20);
+    // Display Octave
+    u8g2.setCursor(85, 20);
     u8g2.print("Oct: ");
     u8g2.print(sysState.octave);
 
-
-    // display wave type of current keyboard
-    textWidth = u8g2.getStrWidth("Wave: ") + u8g2.getStrWidth(waveTypes[sysState.waveType]);
-    u8g2.setCursor(displayWidth - textWidth, 20);
+    // Display Wave type (Saw, Sine, Square)
+    u8g2.setCursor(2, 20);
     u8g2.print("Wave: ");
     u8g2.print(waveTypes[sysState.waveType]);
 
-    // temporarily removed
-    // textWidth = u8g2.getStrWidth("Instr: ") + u8g2.getStrWidth(instrumentTypes[InstrumentKnob.getValue()]);
-    // u8g2.setCursor(displayWidth - textWidth, 30);
-    // u8g2.print("Instr: ");
-    // u8g2.print(instrumentTypes[InstrumentKnob.getValue()]);
-
-    // display volume of current keyboard
-    u8g2.setCursor(2,30);
-    u8g2.print("Vol: ");
+    // Display Volume on the right
+    u8g2.setCursor(85, 10);
+    u8g2.print("VOL: ");
     u8g2.print(sysState.volume);
 
-    // display last received CAN message
-    u8g2.setCursor(63,30);
-    u8g2.print((char) RX_Message_Temp[0]);
-    u8g2.print(RX_Message_Temp[1]);
-    u8g2.print(RX_Message_Temp[2]);
+    // Display the bottom grid section, labels for each knob
+    int gridWidth = 128 / 4;  // Divide the width into 4 sections
 
-    // display last received CAN message
-    u8g2.setCursor(90,30);
-    u8g2.print(westDetect_G);
-    u8g2.print(eastDetect_G);
+    // Draw grid border higher up
+    u8g2.drawFrame(0, 24, 128, 8); // Draw a box that will represent the bottom grid, moved up
 
-    if(sysState.handshakePending)
-    {
-      textWidth = u8g2.getStrWidth("HAND");
-      u8g2.setCursor(displayWidth - textWidth, 10);
-      u8g2.print("HAND");
-    }
+    // Use a smaller font for the labels in the grid
+    u8g2.setFont(u8g2_font_5x8_tr);  // Smaller font for the labels at the bottom
 
-    // push screen buffer to display
+    // Labels for the knobs (moving them up to align properly with the grid)
+    u8g2.setCursor(5, 30); u8g2.print("N/A");
+    u8g2.setCursor(gridWidth + 5, 30); u8g2.print("WAVE");
+    u8g2.setCursor(2 * gridWidth + 5, 30); u8g2.print("OCT");
+    u8g2.setCursor(3 * gridWidth + 5, 30); u8g2.print("VOL");
+
+    // Push the buffer to the display
     u8g2.sendBuffer();
 
-    // toggle lED
+    // Toggle the LED (for feedback)
     digitalToggle(LED_BUILTIN);
 
-    // release systate mutex
+    // Release sysState mutex
     xSemaphoreGive(sysState.mutex);
 
     #ifdef TESTING
-    break; // only run 1 iter for testing
+    break; // Only run 1 iteration for testing
     #endif
-  } 
+  }
 }
+
+
+
 
 // scan TX mailbox and wait until a mailbox is available
 void sendCanTask (void * pvParameters) {
