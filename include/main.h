@@ -21,6 +21,8 @@ struct SysState
     int volume = 0;
     int waveType = 0;
 
+    int currentPage = 0;
+
     bool rightBoard = false;
     int BOARD_ID;
 

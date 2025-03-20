@@ -29,9 +29,6 @@ SemaphoreHandle_t sampleBufferSemaphore;
 int westDetect_G = 0;
 int eastDetect_G = 0;
 
-const int NUM_PAGES = 2;
-int currentPage = 0;
-
 // written to in handshake check and read from in scanKeysTask
 // thread-safe
   
@@ -79,17 +76,15 @@ const int SINE_RESOLUTION = 1 << SINE_RESOLUTION_BITS;  // 2^SINE_RESOLUTION_BIT
 int sineLookup[SINE_RESOLUTION]; // populated in setup, only read from SampleISR
 
 // stores the AD coefficients of ADSR
-float adsrLookup[40]; // populated in setup, only read from SampleISR
-
-int varTime = 0; // stores the amount of data in adsrLookup (max 40)
-int releaseTime = 100;  
-constexpr int SCALE = 32768;  // Q15 fixed-point scale (2^15)
-constexpr float INV_SCALE = 1.0f / SCALE;  // Precomputed for fast conversion
-// float sustainLevel = 1.0f; // Runtime constant
+// we write atomically, so this is thread-safe
+float adsrLookup[40];
 
 void generateAdsrLookup(int attackTime, int decayTime)
 {
-  varTime = attackTime + decayTime;
+  constexpr int SCALE = 32768;  // Q15 fixed-point scale (2^15)
+  constexpr float INV_SCALE = 1.0f / SCALE;  // Precomputed for fast conversion
+
+  int varTime = attackTime + decayTime;
   float sustainLevel = (float)sysState.sustain / 10;
 
   for(int i = 0; i < varTime; i++)
@@ -255,7 +250,7 @@ void receiveCanTask(void * pvParameters)
         {
           if(sysState.keyPressed[i] == ((octave << 8) | key))
           {
-            __atomic_store_n(&sysState.keyPressed[i], 0xFFFF, __ATOMIC_RELAXED);
+            sysState.keyPressed[i] = 0xFFFF;
           }
         } 
       }
@@ -553,18 +548,18 @@ void scanKeysTask(void * pvParameters)
     // joystick_vert = 0;
 
     // if joystick moves an no key presses
-    if(joystick_horiz < -50 && currentPage == 0 && sysState.keyPressed[0] == 0xFFFF)
+    if(joystick_horiz < -50 && sysState.currentPage == 0 && sysState.keyPressed[0] == 0xFFFF)
     {
-      currentPage = 1;
+      sysState.currentPage = 1;
 
       knob1 = Knob(0, 12, sysState.attack);
       knob2 = Knob(0, 12, sysState.decay);
       knob3 = Knob(0, 12, sysState.sustain);
       knob4 = Knob(0, 12, sysState.release);
     }
-    else if(joystick_horiz > 50 && currentPage == 1 && sysState.keyPressed[0] == 0xFFFF)
+    else if(joystick_horiz > 50 && sysState.currentPage == 1 && sysState.keyPressed[0] == 0xFFFF)
     {
-      currentPage = 0;
+      sysState.currentPage = 0;
 
       // knob1 = Knob(0, 1, sysState.attack);
       knob2 = Knob(0, 2, sysState.waveType);
@@ -674,11 +669,11 @@ void scanKeysTask(void * pvParameters)
     knob4.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
     knob1.updateQuadInputs(sysState.inputs[18], sysState.inputs[19]); 
 
-    if(currentPage == 0)
+    if(sysState.currentPage == 0)
     {
-      __atomic_store_n(&sysState.waveType, knob2.getValue(), __ATOMIC_RELAXED);
-      __atomic_store_n(&sysState.octave, knob3.getValue(), __ATOMIC_RELAXED);
-      __atomic_store_n(&sysState.volume, knob4.getValue(), __ATOMIC_RELAXED);
+      sysState.waveType = knob2.getValue();
+      sysState.octave = knob3.getValue();
+      sysState.volume = knob4.getValue();
     }
     else
     {
@@ -692,14 +687,13 @@ void scanKeysTask(void * pvParameters)
         sysState.sustain != sustainNew || sysState.release != releaseNew)
       {
         generateAdsrLookup(sysState.attack, sysState.decay);
-        // generateAdsrLookup(0, 0);
-        __atomic_store_n(&sysState.attack, attackNew, __ATOMIC_RELAXED);
-        __atomic_store_n(&sysState.decay, decayNew, __ATOMIC_RELAXED);
-        __atomic_store_n(&sysState.sustain, sustainNew, __ATOMIC_RELAXED);
-        __atomic_store_n(&sysState.release, releaseNew, __ATOMIC_RELAXED);
+        
+        sysState.attack = attackNew;
+        sysState.decay = decayNew;
+        sysState.sustain = sustainNew;
+        sysState.release = releaseNew;
       }
     }
-    
     
     // manage sending octave change messages
     octave = sysState.octave;
@@ -786,7 +780,7 @@ void displayUpdateTask(void * pvParameters)
     int textWidth = u8g2.getStrWidth("00");
 
     // Draw content for the current page
-    switch (currentPage)
+    switch (sysState.currentPage)
     {
       case 0:  // Page 1 (Current Information)
         // Display keys pressed
@@ -933,7 +927,7 @@ void genBufferTask(void *pvParameters)
         }
 
         // apply ADSR filtering
-        if(channelTimes[i] < varTime){ Vout += v_delta * adsrLookup[channelTimes[i]]; }
+        if(channelTimes[i] < (sysState.attack + sysState.decay)){ Vout += v_delta * adsrLookup[channelTimes[i]]; }
         else { Vout += v_delta * sysState.sustain/10; }
 
         Vout += v_delta;
