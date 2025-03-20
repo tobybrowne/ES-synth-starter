@@ -72,8 +72,8 @@ int eastDetect_G;
 
   // knob inits
   Knob knob4 = Knob(0, 12, 5); // volume
-  Knob octaveKnob = Knob(0, 8, 3);
-  Knob knob2 = Knob(0, 2, 0);
+  Knob knob3 = Knob(0, 8, 3); //octave
+  Knob knob2 = Knob(0, 2, 0); // wave
   Knob InstrumentKnob = Knob(0, 1, 1);
 
   uint8_t RX_Message_Temp[8] = {0};
@@ -101,7 +101,7 @@ int eastDetect_G;
   uint32_t stepSizes[12];
 
   // stores sine wave with SINE_RESOLUTION x-values with amplitude -2048 to 2048
-  const int SINE_RESOLUTION_BITS = 10;
+  const int SINE_RESOLUTION_BITS = 12;
   const int SINE_RESOLUTION = 1 << SINE_RESOLUTION_BITS;  // 2^SINE_RESOLUTION_BITS
 
   int sineLookup[SINE_RESOLUTION]; // populated in setup, only read from SampleISR
@@ -179,8 +179,8 @@ void receiveCanTask(void * pvParameters)
     {
       sysState.octaveOverride = true; // prevents these changes also being broadcasted on CAN
       int8_t octave = (int8_t)RX_Message[1]; // needs to be signed
-      octaveCurrent = octaveKnob.getValue();
-      octaveKnob.setValue(octaveCurrent + (int)octave);
+      octaveCurrent = sysState.octave;
+      knob3.setValue(octaveCurrent + (int)octave);
     }
 
     // set stereo balance
@@ -296,6 +296,7 @@ void sendEndHandshake()
 // send a +N octave message
 void sendChangeOctave(int octaveChange)
 {
+  Serial.println(octaveChange);
   uint8_t TX_Message[8] = {0};
   TX_Message[0] = 'O';
   TX_Message[1] = octaveChange;
@@ -435,32 +436,32 @@ void checkHandshakeTask(void * pvParameters)
     westDetect_G = westDetect;
     eastDetect_G = eastDetect;
 
-    // // east LOW to HIGH
-    // if(lastEast == 0 && eastDetect == 1)
-    // {
-    //   // // keyboard plugged into right
-    //   // if(sysState.BOARD_ID != -1)
-    //   // {
-    //   //   // turn east off
-    //   //   __atomic_store_n(&outBits[6], 0, __ATOMIC_RELAXED);
-    //   //   setOutMuxBit(HKOE_BIT, LOW);
+    // east LOW to HIGH
+    if(lastEast == 0 && eastDetect == 1)
+    {
+      // keyboard plugged into right
+      if(sysState.BOARD_ID != -1)
+      {
+        // turn east off
+        __atomic_store_n(&outBits[6], 0, __ATOMIC_RELAXED);
+        setOutMuxBit(HKOE_BIT, LOW);
 
-    //   //   // break for 1.5 secs to allow east signal to propagate
-    //   //   sysState.handshakePending = true;
-    //   //   sysState.ID_RECV = -1;
-    //   //   xSemaphoreGive(sysState.mutex);
+        // break for 1.5 secs to allow east signal to propagate
+        sysState.handshakePending = true;
+        sysState.ID_RECV = -1;
+        xSemaphoreGive(sysState.mutex);
 
-    //   //   #ifndef TESTING
-    //   //   vTaskDelay(pdMS_TO_TICKS(000));
-    //   //   #endif
+        #ifndef TESTING
+        vTaskDelay(pdMS_TO_TICKS(250));
+        #endif
 
-    //   //   xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-    //   //   sysState.handshakePending = false;
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        sysState.handshakePending = false;
 
-    //   //   // send the board it's id
-    //   //   sendID(sysState.BOARD_ID+1);
-    //   // }
-    // }
+        // send the board it's id
+        sendID(sysState.BOARD_ID+1);
+      }
+    }
     // east HIGH to LOW
     // else if(lastEast == 1 && eastDetect == 0)
     // { 
@@ -518,7 +519,8 @@ void checkHandshakeTask(void * pvParameters)
         sysState.rightBoard = false;
       }
       
-      octaveKnob.setValue(sysState.BOARD_ID);
+      knob3.setValue(sysState.BOARD_ID);
+      sysState.octave = sysState.BOARD_ID;
       sysState.octaveOverride = true;
   
       // send board it's new ID
@@ -691,22 +693,6 @@ void scanKeysTask(void * pvParameters)
     for(int i = 0; i < CHANNELS; i++){ sysState.keyPressed[i] = 0x0000;}
     #endif
 
-    // manage sending octave change messages
-    octave = octaveKnob.getValue();
-    if((octave != lastOctave) && lastOctave != -1)
-    {
-      if(sysState.octaveOverride)
-      {
-        sysState.octaveOverride = false; // reset flag
-        lastOctave = octave;
-      }
-      else
-      {
-        // send a +N octave message
-        sendChangeOctave(octave - lastOctave);
-        lastOctave = octave;
-      }
-    }
 
     // check for key releases
     std::unordered_set<uint8_t> localKeys; // cache key indexes for quick lookup
@@ -724,7 +710,7 @@ void scanKeysTask(void * pvParameters)
       {
         if(sysState.sender)
         {
-            sendKeyPress('R', octave, keyIndex);
+          sendKeyPress('R', octave, keyIndex);
         }
       }
     }
@@ -754,15 +740,40 @@ void scanKeysTask(void * pvParameters)
     }
 
     // check knob rotation
-    octaveKnob.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
+    knob3.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
     knob2.updateQuadInputs(sysState.inputs[16], sysState.inputs[17]);
     InstrumentKnob.updateQuadInputs(sysState.inputs[18], sysState.inputs[19]); 
     knob4.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
 
-    sysState.volume = knob4.getValue();
     __atomic_store_n(&sysState.waveType, knob2.getValue(), __ATOMIC_RELAXED);
+    __atomic_store_n(&sysState.octave, knob3.getValue(), __ATOMIC_RELAXED);
+    __atomic_store_n(&sysState.volume, knob4.getValue(), __ATOMIC_RELAXED);
 
-  
+
+    // manage sending octave change messages
+    octave = sysState.octave;
+    // Serial.println(octave);
+    if(lastOctave == -1)
+    {
+      lastOctave = octave;
+    }
+
+    if(octave != lastOctave)
+    {
+      Serial.println("change octave!");
+      if(sysState.octaveOverride)
+      {
+        sysState.octaveOverride = false; // reset flag
+        lastOctave = octave;
+      }
+      else
+      {
+        // send a +N octave message
+        sendChangeOctave(octave - lastOctave);
+        lastOctave = octave;
+      }
+    }
+
     // if(!sysState.stereo) // no knob volume control in stereo mode
     // {
       
@@ -775,9 +786,14 @@ void scanKeysTask(void * pvParameters)
       // KEY IS TURNED OFF IN ADSR FUNCTION!
       if(keyPressedLocal[i] == 0xFFFF)
       {
-        if(releaseTimes[i] == 0)
+        // new release
+        if(sysState.keyPressed[i] != 0xFFFF)
         {
-          releaseTimes[i] = channelTimes[i];
+          if(releaseTimes[i] == 0)
+          {
+            releaseTimes[i] = channelTimes[i];
+            Serial.println("release");
+          }
         }
       }
 
@@ -890,7 +906,7 @@ void displayUpdateTask(void * pvParameters)
     // display octave of current keyboard
     u8g2.setCursor(2,20);
     u8g2.print("Oct: ");
-    u8g2.print(octaveKnob.getValue());
+    u8g2.print(sysState.octave);
 
 
     // display wave type of current keyboard
@@ -981,10 +997,15 @@ void TaskMonitor(void *pvParameters) {
 
 // need to test different parameters for this
 // piano? / strings / guitar / drums
-int attackTime = 20;    
-int decayTime = 20;     
+// int attackTime = 20;    
+// int decayTime = 20;     
+// float sustainLevel = 1; // number from 0 to 1
+// int releaseTime = 200; 
+
+int attackTime = 0;    
+int decayTime = 0;     
 float sustainLevel = 1; // number from 0 to 1
-int releaseTime = 200;  
+int releaseTime = 0;  
 
 // TODO: currently take 2ms!!! // make faster
 float applyADSR(int i)
@@ -999,11 +1020,12 @@ float applyADSR(int i)
     float_envelope = (sustainLevel) - (sustainLevel * ((currentTime - releaseTimes[i]))/(releaseTime));
     // float_envelope = (float)envelope / 100;
     
-    if(float_envelope < 0.01)
+    if((channelTimes[i] - releaseTimes[i]) > releaseTime)
     {
+      float_envelope = 0;
       // turn key off
       // TODO: does keyPressed and releaseTimes need atomic access?
-      __atomic_store_n(&sysState.keyPressed[i], 0xFFFF, __ATOMIC_RELAXED);
+      sysState.keyPressed[i] = 0xFFFF;
       releaseTimes[i] = 0;
     }
   }
@@ -1041,33 +1063,48 @@ void genBufferTask(void *pvParameters)
   uint32_t phaseAcc[CHANNELS * 2] = {0};
   uint16_t Vout = 0; //Calculate one sample
   uint16_t v_delta = 0;
+  uint32_t lfoPhaseAcc = 0;
+  bool activeKeys;
 
   while(1)
   {
     xSemaphoreTake(sampleBufferSemaphore, portMAX_DELAY);
     int waveType = sysState.waveType;
+    
+
     for (uint32_t writeCtr = 0; writeCtr < SAMPLE_BUFFER_SIZE/2; writeCtr++)
     {
       v_delta = 0;
       Vout = 0;
-  
+
+      activeKeys = false;
+
       // loop through internal channels
-      for (int i = 0; i < 2*CHANNELS; i++)
+      for (int i = 0; i < CHANNELS; i++)
       {
         if (currentStepSize[i] == 0) { continue; };
 
-        phaseAcc[i] += currentStepSize[i];
+        
+        activeKeys = true;
 
         // Generate waveform based on waveType
         if (waveType == 0) // Sawtooth Wave
         {
+          phaseAcc[i] += currentStepSize[i];
           v_delta = (phaseAcc[i] >> 20) - 2048;
         }
         else if (waveType == 1) // Sine Wave
         {
-          // int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
-          int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & ((1 << SINE_RESOLUTION_BITS) - 1);
-          v_delta = sineLookup[angle];
+          // // int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF; 
+          // // int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & ((1 << SINE_RESOLUTION_BITS) - 1);
+          // int angle = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & 0xFF;
+          // v_delta = sineLookup[angle];
+
+          phaseAcc[i] += currentStepSize[i];
+          
+          uint32_t index = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & (SINE_RESOLUTION - 1);  
+          v_delta = sineLookup[index];
+
         }
         else if (waveType == 2) // Square Wave
         {
@@ -1081,6 +1118,18 @@ void genBufferTask(void *pvParameters)
         Vout += v_delta * applyADSR(i);
         //Vout += v_delta;
       }
+      
+
+      if(activeKeys)
+      {
+        // add LFO
+        // lfoPhaseAcc += stepSizes[0] << 3;
+        // int angle = (lfoPhaseAcc >> (32 - SINE_RESOLUTION_BITS)) & ((1 << SINE_RESOLUTION_BITS) - 1);
+        // v_delta = sineLookup[angle] << 6;
+        // Vout += v_delta;
+      }
+
+
 
       // Apply volume control using logarithmic tapering
       Vout = Vout >> (12 - sysState.volume);
@@ -1381,16 +1430,19 @@ void setup()
   &genBuffer );	/* Pointer to store the task handle */
   
   // Create the monitor task
-  xTaskCreate(TaskMonitor, "Monitor", 2000, NULL, 1, NULL);
+  // xTaskCreate(TaskMonitor, "Monitor", 2000, NULL, 1, NULL);
 
   #endif
 
   // compute sine values for lookup table
-  uint32_t phase = 0;
-  while(phase < SINE_RESOLUTION)
+  //sineLookup[phase] = std::round(2048 * std::sin((2*M_PI*phase)/SINE_RESOLUTION));
+  for (uint32_t phase = 0; phase < SINE_RESOLUTION; ++phase)
   {
-    sineLookup[phase] = std::round(2048 * std::sin((2*M_PI*phase)/SINE_RESOLUTION));
-    phase+=1;
+      // Convert index to angle in radians (0 to 2pi)
+      float angle = (2.0f * M_PI * phase) / SINE_RESOLUTION;
+
+      // Scale sine value to fit int16_t range (-2048 to 2047)
+      sineLookup[phase] = static_cast<int16_t>(std::round(std::sin(angle) * 2047.0f));
   }
 
   //Set pin directions
