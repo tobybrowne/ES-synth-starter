@@ -12,7 +12,7 @@
 #include "test.h"
 #include "analog.h"
 
-#define TESTING
+//#define TESTING
 
 DAC_HandleTypeDef hdac;
 TIM_HandleTypeDef htim2;
@@ -28,6 +28,9 @@ SemaphoreHandle_t sampleBufferSemaphore;
 // TODO: remove, just for UI testing
 int westDetect_G = 0;
 int eastDetect_G = 0;
+
+const int NUM_PAGES = 2;
+int currentPage = 0;
 
 // written to in handshake check and read from in scanKeysTask
 // thread-safe
@@ -49,7 +52,7 @@ SysState sysState;
 Knob knob4 = Knob(0, 12, 7); // volume
 Knob knob3 = Knob(0, 8, 6); // octave
 Knob knob2 = Knob(0, 2, 0); // wave
-Knob InstrumentKnob = Knob(0, 1, 1);
+Knob knob1 = Knob(0, 1, 1);
 
 uint8_t RX_Message_Temp[8] = {0};
 
@@ -82,19 +85,18 @@ int varTime = 0; // stores the amount of data in adsrLookup (max 40)
 int releaseTime = 100;  
 constexpr int SCALE = 32768;  // Q15 fixed-point scale (2^15)
 constexpr float INV_SCALE = 1.0f / SCALE;  // Precomputed for fast conversion
-float sustainLevel = 1.0f; // Runtime constant
-int attackTime = 20;
-int decayTime = 20;
+// float sustainLevel = 1.0f; // Runtime constant
 
 void generateAdsrLookup(int attackTime, int decayTime)
 {
   varTime = attackTime + decayTime;
+  float sustainLevel = (float)sysState.sustain / 10;
 
   for(int i = 0; i < varTime; i++)
   {
     int32_t currentTime = i;
     int32_t envelope = 0;
-    int32_t sustainFixed = (int32_t)(sustainLevel * SCALE); // Compute at runtime
+    int32_t sustainFixed = (int32_t)((sustainLevel/10) * SCALE); // Compute at runtime
 
     if (currentTime < attackTime)
     {
@@ -112,9 +114,6 @@ void generateAdsrLookup(int attackTime, int decayTime)
     adsrLookup[i] = envelope * INV_SCALE; // Convert to float at the end
   }
 }
-
-
-
 
 // display driver objects
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
@@ -509,7 +508,7 @@ void readJoystick(int* horiz, int* vert)
   // y-axis mappings
   y_axis = constrain(y_axis, 410, 3510);
   *vert = map(y_axis, 410, 3510, 100, -100);
-  if(*vert < 10 && *vert > -10){ *vert = 0; }
+  if(*vert < 20 && *vert > -20){ *vert = 0; }
 
   // TODO: add deadzone to x axis
   x_axis = constrain(x_axis, 50, 3650);
@@ -548,25 +547,26 @@ void scanKeysTask(void * pvParameters)
     uint32_t currentStepSize_Local[2*CHANNELS] = {0};
 
     readJoystick(&joystick_horiz, &joystick_vert);
+    // joystick_vert = 0;
 
-    if(joystick_horiz != last_joystick_horiz)
+    // if joystick moves an no key presses
+    if(joystick_horiz < -50 && currentPage == 0 && sysState.keyPressed[0] == 0xFFFF)
     {
-      // sends message to right board 
-      if(sysState.BOARD_ID == 0 && sysState.stereo)
-      {
-        // Scale from [-100, 100] to [0, 16]
-        int stereoBalance = constrain(joystick_horiz, -100, 100);
-        
-        stereoBalance = map(stereoBalance, -100, 100, 0, 16);
+      currentPage = 1;
 
-        // send message to right board
-        sendStereoBalance(stereoBalance);
+      knob1 = Knob(0, 12, sysState.attack);
+      knob2 = Knob(0, 12, sysState.decay);
+      knob3 = Knob(0, 12, sysState.sustain);
+      knob4 = Knob(0, 12, sysState.release);
+    }
+    else if(joystick_horiz > 50 && currentPage == 1 && sysState.keyPressed[0] == 0xFFFF)
+    {
+      currentPage = 0;
 
-        int leftVolume = 8 - (stereoBalance / 2);
-
-        sysState.volume = leftVolume;
-      }
-      last_joystick_horiz = joystick_horiz;
+      // knob1 = Knob(0, 1, sysState.attack);
+      knob2 = Knob(0, 2, sysState.waveType);
+      knob3 = Knob(0, 8, sysState.octave);
+      knob4 = Knob(0, 12, sysState.volume);
     }
 
     // increment all times in channelTimes
@@ -668,16 +668,35 @@ void scanKeysTask(void * pvParameters)
     // check knob rotation
     knob3.updateQuadInputs(sysState.inputs[14], sysState.inputs[15]);
     knob2.updateQuadInputs(sysState.inputs[16], sysState.inputs[17]);
-    InstrumentKnob.updateQuadInputs(sysState.inputs[18], sysState.inputs[19]); 
     knob4.updateQuadInputs(sysState.inputs[12], sysState.inputs[13]);
+    knob1.updateQuadInputs(sysState.inputs[18], sysState.inputs[19]); 
 
-    __atomic_store_n(&sysState.waveType, knob2.getValue(), __ATOMIC_RELAXED);
-    __atomic_store_n(&sysState.octave, knob3.getValue(), __ATOMIC_RELAXED);
-
-    if(sysState.stereo == false)
+    if(currentPage == 0)
     {
+      __atomic_store_n(&sysState.waveType, knob2.getValue(), __ATOMIC_RELAXED);
+      __atomic_store_n(&sysState.octave, knob3.getValue(), __ATOMIC_RELAXED);
       __atomic_store_n(&sysState.volume, knob4.getValue(), __ATOMIC_RELAXED);
     }
+    else
+    {
+      int attackNew = knob1.getValue();
+      int decayNew = knob2.getValue();
+      int sustainNew = knob3.getValue();
+      int releaseNew = knob4.getValue();
+
+      // if changed ADSR
+      if(sysState.attack != attackNew || sysState.decay != decayNew || 
+        sysState.sustain != sustainNew || sysState.release != releaseNew)
+      {
+        generateAdsrLookup(sysState.attack, sysState.decay);
+        // generateAdsrLookup(0, 0);
+        __atomic_store_n(&sysState.attack, attackNew, __ATOMIC_RELAXED);
+        __atomic_store_n(&sysState.decay, decayNew, __ATOMIC_RELAXED);
+        __atomic_store_n(&sysState.sustain, sustainNew, __ATOMIC_RELAXED);
+        __atomic_store_n(&sysState.release, releaseNew, __ATOMIC_RELAXED);
+      }
+    }
+    
     
     // manage sending octave change messages
     octave = sysState.octave;
@@ -737,7 +756,7 @@ void scanKeysTask(void * pvParameters)
 void displayUpdateTask(void * pvParameters)
 {
   #ifndef TESTING
-  const TickType_t xFrequency = 200/portTICK_PERIOD_MS;
+  const TickType_t xFrequency = 100/portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
   #endif
 
@@ -756,77 +775,82 @@ void displayUpdateTask(void * pvParameters)
     // take systate mutex
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
 
-    u8g2.clearBuffer();         // clear the internal memory
-    u8g2.setFont(u8g2_font_ncenB08_tr); // choose a suitable font
-    
-    // display notes pressed on current keyboard
-    u8g2.setCursor(2,10);
-    u8g2.print("Keys: ");
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_ncenB08_tr);  // Choose a suitable font
 
-    // Print the keys that are pressed
-    for (int i = 0; i < CHANNELS; i++) {
-      if (sysState.keyPressed[i] != 0xFFFF) {
-        
-        u8g2.print(keyNames[sysState.keyPressed[i] & 0xFF]);
-        u8g2.print(" ");
-      }
-    }
-
-    // Determine the width of the display
+    // Declare display width and text width variables before switch
     int displayWidth = u8g2.getDisplayWidth();
-    
-    int textWidth = u8g2.getStrWidth("00"); // RECV and SEND have same width
-    u8g2.setCursor(displayWidth - textWidth, 10);
-    u8g2.print(sysState.BOARD_ID);
+    int textWidth = u8g2.getStrWidth("00");
 
-    // display octave of current keyboard
-    u8g2.setCursor(2,20);
-    u8g2.print("Oct: ");
-    u8g2.print(sysState.octave);
-
-
-    // display wave type of current keyboard
-    textWidth = u8g2.getStrWidth("Wave: ") + u8g2.getStrWidth(waveTypes[sysState.waveType]);
-    u8g2.setCursor(displayWidth - textWidth, 20);
-    u8g2.print("Wave: ");
-    u8g2.print(waveTypes[sysState.waveType]);
-
-    // temporarily removed
-    // textWidth = u8g2.getStrWidth("Instr: ") + u8g2.getStrWidth(instrumentTypes[InstrumentKnob.getValue()]);
-    // u8g2.setCursor(displayWidth - textWidth, 30);
-    // u8g2.print("Instr: ");
-    // u8g2.print(instrumentTypes[InstrumentKnob.getValue()]);
-
-    // display volume of current keyboard
-    u8g2.setCursor(2,30);
-    u8g2.print("Vol: ");
-    u8g2.print(sysState.volume);
-
-    // display last received CAN message
-    u8g2.setCursor(63,30);
-    u8g2.print((char) RX_Message_Temp[0]);
-    u8g2.print(RX_Message_Temp[1]);
-    u8g2.print(RX_Message_Temp[2]);
-
-    // display last received CAN message
-    u8g2.setCursor(90,30);
-    u8g2.print(westDetect_G);
-    u8g2.print(eastDetect_G);
-
-    if(sysState.handshakePending)
+    // Draw content for the current page
+    switch (currentPage)
     {
-      textWidth = u8g2.getStrWidth("HAND");
-      u8g2.setCursor(displayWidth - textWidth, 10);
-      u8g2.print("HAND");
+      case 0:  // Page 1 (Current Information)
+        // Display keys pressed
+        u8g2.setCursor(2, 10);
+        u8g2.print("Keys: ");
+        for (int i = 0; i < CHANNELS; i++) {
+          if (sysState.keyPressed[i] != 0xFFFF) {
+            u8g2.print(keyNames[sysState.keyPressed[i] & 0xFF]);
+            u8g2.print(" ");
+          }
+        }
+
+        // Display other current information (octave, wave, volume, etc.)
+        u8g2.setCursor(displayWidth - textWidth, 10);
+        u8g2.print(sysState.BOARD_ID);
+
+        u8g2.setCursor(2, 20);
+        u8g2.print("Oct: ");
+        u8g2.print(sysState.octave);
+
+        textWidth = u8g2.getStrWidth("Wave: ") + u8g2.getStrWidth(waveTypes[knob2.getValue()]);
+        u8g2.setCursor(displayWidth - textWidth, 20);
+        u8g2.print("Wave: ");
+        u8g2.print(waveTypes[knob2.getValue()]);
+
+        u8g2.setCursor(2, 30);
+        u8g2.print("Vol: ");
+        u8g2.print(knob4.getValue());
+
+        u8g2.setCursor(63, 30);
+        u8g2.print((char) RX_Message_Temp[0]);
+        u8g2.print(RX_Message_Temp[1]);
+        u8g2.print(RX_Message_Temp[2]);
+
+        if (sysState.handshakePending) {
+          textWidth = u8g2.getStrWidth("HAND");
+          u8g2.setCursor(displayWidth - textWidth, 10);
+          u8g2.print("HAND");
+        }
+        break;
+
+      case 1:  
+          u8g2.setCursor(2, 20);
+          u8g2.print("A: ");
+          u8g2.print(sysState.attack);
+          
+          // Top-right corner
+          textWidth = u8g2.getStrWidth("S: ") + u8g2.getStrWidth("   ");
+          u8g2.setCursor(displayWidth - textWidth, 20);
+          u8g2.print("S: ");
+          u8g2.print(sysState.sustain);
+          
+          // Bottom-left corner
+          u8g2.setCursor(2, 30);
+          u8g2.print("D: ");
+          u8g2.print(sysState.decay);
+          
+          // Bottom-right corner
+          textWidth = u8g2.getStrWidth("R: ") + u8g2.getStrWidth("   ");
+          u8g2.setCursor(displayWidth - textWidth, 30);
+          u8g2.print("R: ");
+          u8g2.print(sysState.release);
+      break;
     }
-
-    // push screen buffer to display
     u8g2.sendBuffer();
-
-    // toggle lED
     digitalToggle(LED_BUILTIN);
 
-    // release systate mutex
     xSemaphoreGive(sysState.mutex);
 
     #ifdef TESTING
@@ -907,7 +931,7 @@ void genBufferTask(void *pvParameters)
 
         // apply ADSR filtering
         if(channelTimes[i] < varTime){ Vout += v_delta * adsrLookup[channelTimes[i]]; }
-        else { Vout += v_delta * sustainLevel; }
+        else { Vout += v_delta * sysState.sustain/10; }
 
         Vout += v_delta;
       }
@@ -1176,7 +1200,8 @@ void setup()
   }
 
   // compute AD of ADSR lookup table
-  generateAdsrLookup(attackTime, decayTime);
+  // generateAdsrLookup(sysState.attack, sysState.decay);
+  generateAdsrLookup(sysState.attack, sysState.decay);
 
   //Set pin directions
   pinMode(RA0_PIN, OUTPUT);

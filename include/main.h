@@ -32,6 +32,11 @@ struct SysState
 
     bool octaveOverride = false;
 
+    int attack = 10;
+    int decay = 10;
+    int sustain = 10; // integer from 0 to 10
+    int release = 10;
+
     SemaphoreHandle_t mutex; 
 };
 
