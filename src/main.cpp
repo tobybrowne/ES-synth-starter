@@ -12,7 +12,7 @@
 #include "test.h"
 #include "analog.h"
 
-//#define TESTING
+// #define TESTING
 
 DAC_HandleTypeDef hdac;
 TIM_HandleTypeDef htim2;
@@ -266,7 +266,8 @@ void receiveCanTask(void * pvParameters)
 }
 
 // runs whenever a CAN message is received
-void CAN_RX_ISR (void) {
+void CAN_RX_ISR (void)
+{
 	uint8_t RX_Message_ISR[8];
 	uint32_t ID;
 	CAN_RX(ID, RX_Message_ISR);

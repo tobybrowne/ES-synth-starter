@@ -149,10 +149,10 @@ void test_sendCanTask()
   uint32_t startTime = micros();
   for (int iter = 0; iter < 32; iter++)
   {
-    sendCanTask(NULL);
-
     // TODO: see if this can be done without including this in the timing
     xSemaphoreGive(CAN_TX_Semaphore);
+
+    sendCanTask(NULL);
   }
   uint32_t endTime = micros();
   Serial.println("======== sendCanTask test ========");
