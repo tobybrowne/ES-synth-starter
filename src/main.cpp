@@ -12,107 +12,117 @@
 #include "test.h"
 #include "analog.h"
 
+#define TESTING
+
 DAC_HandleTypeDef hdac;
-DMA_HandleTypeDef hdma_dac1;
 TIM_HandleTypeDef htim2;
 ADC_HandleTypeDef hadc1;
 
-// // Interrupt handler for DMA1 channel 3
-// extern "C" void DMA1_Channel3_IRQHandler(void) {
-//   HAL_DMA_IRQHandler(&hdma_dac1);
-// }
-
-// extern "C" void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
-//   if (htim->Instance == TIM2) {  // Check if it's TIM2
-//       Serial.println("TIM2 event triggered!");
-//   }
-// }
-
+// double buffering
 const int SAMPLE_BUFFER_SIZE = 1024;
 uint16_t sampleBuffer0[SAMPLE_BUFFER_SIZE/2];
 uint16_t sampleBuffer1[SAMPLE_BUFFER_SIZE/2];
 volatile bool writeBuffer1 = false;
 SemaphoreHandle_t sampleBufferSemaphore; 
 
-int westDetect_G;
-int eastDetect_G;
+// TODO: remove, just for UI testing
+int westDetect_G = 0;
+int eastDetect_G = 0;
 
-// #define TESTING
-
-// WE ONLY DO SEMAPHORES AND MUTEXES TO ENSURE NOTHING GETS READ WHILST WE ARE STILL WRITING TO IT
-// HENCE WHY AN ATOMIC STORE IS IMPORTANT BUT NOT AN ATOMIC READ
-// THE ISR MAY INTERRUPT A PROCESS AT ANY POINTS, ALWAYS REMEMBER
-
-// ISRs INTERRUPTS ALL RTOS TASKS
-
-// currentStepSize can be read by the sampling ISR at any point so it must always be in a valid state
-
-// We use atomic stores, in case the variable being written to is read in an ISR, which may be called mid-way through the writing process.
-// An atomic load is used when a variable is being read from which may be being written to at the same time (we don't have this case in our code)
-
-// We use VOLATILE for variables which are modified in an ISR and read in an RTOS task
-
-  // only written to in handshake check (done atomically)
-  // read from in scanKeysTask
-  // last two are west and east (they've both been turned on)
-  int outBits[7] = {0, 0, 0, 1, 1, 1, 1}; // thread-safe
+// written to in handshake check and read from in scanKeysTask
+int outBits[7] = {0, 0, 0, 1, 1, 1, 1}; // thread-safe
   
-//Constants
-  const uint32_t interval = 100; //Display update interval
+// constants
+const uint32_t interval = 100; //Display update interval
 
-  // CAN message buffers (these are thread safe!)
-  QueueHandle_t msgInQ;
-  QueueHandle_t msgOutQ;
+// CAN message buffers (these are thread safe!)
+QueueHandle_t msgInQ;
+QueueHandle_t msgOutQ;
 
-  // controls acccess to the CAN mailboxes (hardware has 3)
-  SemaphoreHandle_t CAN_TX_Semaphore;
+// controls acccess to the CAN mailboxes (hardware has 3)
+SemaphoreHandle_t CAN_TX_Semaphore;
 
-  // store device state  
-  SysState sysState;
+// store device state  
+SysState sysState;
 
-  // knob inits
-  Knob knob4 = Knob(0, 12, 7); // volume
-  Knob knob3 = Knob(0, 8, 6); // octave
-  Knob knob2 = Knob(0, 2, 0); // wave
-  Knob InstrumentKnob = Knob(0, 1, 1);
+// knob inits
+Knob knob4 = Knob(0, 12, 7); // volume
+Knob knob3 = Knob(0, 8, 6); // octave
+Knob knob2 = Knob(0, 2, 0); // wave
+Knob InstrumentKnob = Knob(0, 1, 1);
 
-  uint8_t RX_Message_Temp[8] = {0};
+uint8_t RX_Message_Temp[8] = {0};
 
-  // TODO: what variables should be volatile?
-  // stores the current step sizes that should be played
-  // first half stores internal key presses, second half stores external key presses
-  // SHOULD JUST BE USED TO TRANSFER FREQS BETWEEN SCANKEYS AND SAMPLEISR
-  volatile uint32_t currentStepSize[2*CHANNELS];
+// first half stores internal key presses, second half stores external key presses
+volatile uint32_t currentStepSize[2*CHANNELS];
 
-  // how long since the key was pressed
-  // stores an int from 0 -> DAMPER_RESOLUTION
-  float DAMPER_RESOLUTION = 30;
-  volatile int channelTimes[2*CHANNELS] = {0};
-  volatile int releaseTimes[2*CHANNELS] = {0};
+// how long since the key was pressed/released
+volatile int channelTimes[2*CHANNELS] = {0};
+volatile int releaseTimes[2*CHANNELS] = {0};
 
-  // TODO: make these memory safe by moving into sysState (described in Lab2)
-  // stores the last sent/received CAN message
-  // only accessed in CAN RX task (mem safe)
+// TODO: make these memory safe by moving into sysState (described in Lab2)
+// WHATS THIS IN REFERENCE TO
+// stores the last sent/received CAN message
+// only accessed in CAN RX task (mem safe)
 
-  // frequencies for each key at octave 0
-  const int keyFreqs[12] = {65, 69, 73, 78, 82, 87, 93, 98, 104, 110, 116, 123};
-  
-  // stores the step sizes corresponding with each key at octave 0
-  uint32_t stepSizes[12];
+// frequencies for each key at octave 0
+const int keyFreqs[12] = {65, 69, 73, 78, 82, 87, 93, 98, 104, 110, 116, 123};
+// stores the step sizes corresponding with each key at octave 0
+uint32_t stepSizes[12];
 
-  // stores sine wave with SINE_RESOLUTION x-values with amplitude -2048 to 2048
-  const int SINE_RESOLUTION_BITS = 10;
-  const int SINE_RESOLUTION = 1 << SINE_RESOLUTION_BITS;  // 2^SINE_RESOLUTION_BITS
+// stores sine wave with SINE_RESOLUTION x-values with amplitude -2048 to 2048
+const int SINE_RESOLUTION_BITS = 10;
+const int SINE_RESOLUTION = 1 << SINE_RESOLUTION_BITS;  // 2^SINE_RESOLUTION_BITS
+int sineLookup[SINE_RESOLUTION]; // populated in setup, only read from SampleISR
 
-  int sineLookup[SINE_RESOLUTION]; // populated in setup, only read from SampleISR
+// stores the AD coefficients of ADSR
+float adsrLookup[40]; // populated in setup, only read from SampleISR
 
-//Display driver objects
+int varTime = 0; // stores the amount of data in adsrLookup (max 40)
+int releaseTime = 100;  
+constexpr int SCALE = 32768;  // Q15 fixed-point scale (2^15)
+constexpr float INV_SCALE = 1.0f / SCALE;  // Precomputed for fast conversion
+float sustainLevel = 1.0f; // Runtime constant
+int attackTime = 20;
+int decayTime = 20;
+
+void generateAdsrLookup(int attackTime, int decayTime)
+{
+  varTime = attackTime + decayTime;
+
+  for(int i = 0; i < varTime; i++)
+  {
+    int32_t currentTime = i;
+    int32_t envelope = 0;
+    int32_t sustainFixed = (int32_t)(sustainLevel * SCALE); // Compute at runtime
+
+    if (currentTime < attackTime)
+    {
+      envelope = (currentTime * SCALE) / attackTime;
+    }
+    else if (currentTime < (attackTime + decayTime))
+    {
+        uint32_t decayProgress = currentTime - attackTime;
+        envelope = SCALE - ((SCALE - sustainFixed) * decayProgress / decayTime);
+    }
+
+    if (envelope < 0) envelope = 0;
+    if (envelope > SCALE) envelope = SCALE;
+
+    adsrLookup[i] = envelope * INV_SCALE; // Convert to float at the end
+  }
+}
+
+
+
+
+// display driver objects
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 
-// define timer object
+// define timer object for sampleISR
 HardwareTimer sampleTimer(TIM1);
 
-// Function to set outputs using key matrix
+// function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value) {
   digitalWrite(REN_PIN,LOW);
   digitalWrite(RA0_PIN, bitIdx & 0x01);
@@ -167,8 +177,6 @@ void receiveCanTask(void * pvParameters)
     // take systate mutex
     xSemaphoreTake(sysState.mutex, portMAX_DELAY);
 
-    uint8_t action = RX_Message[0];
-
     // TODO: remove after debugging
     RX_Message_Temp[0] = RX_Message[0];
     RX_Message_Temp[1] = RX_Message[1];
@@ -179,8 +187,8 @@ void receiveCanTask(void * pvParameters)
     {
       sysState.octaveOverride = true; // prevents these changes also being broadcasted on CAN
       int8_t octave = (int8_t)RX_Message[1]; // needs to be signed
-      octaveCurrent = sysState.octave;
-      knob3.setValue(octaveCurrent + (int)octave);
+      sysState.octave = sysState.octave + (int)octave;
+      knob3.setValue(sysState.octave);
     }
 
     // set stereo balance
@@ -209,12 +217,14 @@ void receiveCanTask(void * pvParameters)
         sysState.ID_RECV = RX_Message[1];
       }
     }
+
+    // end of handshaking message
     else if(RX_Message[0] == 'E')
     {
-      // turn east back on
-      __atomic_store_n(&outBits[6], 1, __ATOMIC_RELAXED);
+      __atomic_store_n(&outBits[6], 1, __ATOMIC_RELAXED); // turn east back on
     }
 
+    // if receiver...
     if(!sysState.sender)
     {
       uint8_t octave = RX_Message[1];
@@ -224,32 +234,16 @@ void receiveCanTask(void * pvParameters)
       // key press
       if(RX_Message[0] == 'P')
       {
-        bool found = false;
-        // prevents repeat key presses
         for(int i = CHANNELS; i < 2*CHANNELS; i++)
         {
-          if(((octave << 8) & key) == sysState.keyPressed[i])
+          // can only play if we have available channels
+          if(sysState.keyPressed[i] == 0xFFFF)
           {
-            found = true;
+            __atomic_store_n(&channelTimes[CHANNELS + i], 0, __ATOMIC_RELAXED);
+            sysState.keyPressed[i] = (octave << 8) | key;
+            break;
           }
         }
-        if(found == false)
-        {
-          for(int i = CHANNELS; i < 2*CHANNELS; i++)
-          {
-            // can only play if we have available channels
-            if(sysState.keyPressed[i] == 0xFFFF)
-            {
-              __atomic_store_n(&channelTimes[CHANNELS + i], 0, __ATOMIC_RELAXED);
-              sysState.keyPressed[i] = (octave << 8) | key;
-              Serial.print("P");
-              Serial.print(octave);
-              Serial.print(key);
-              Serial.print("\n");
-              break;
-            }
-          } 
-        }  
       }
 
       // key release
@@ -257,10 +251,8 @@ void receiveCanTask(void * pvParameters)
       {
         for(int i = CHANNELS; i < 2*CHANNELS; i++)
         {
-
           if(sysState.keyPressed[i] == ((octave << 8) | key))
           {
-
             __atomic_store_n(&sysState.keyPressed[i], 0xFFFF, __ATOMIC_RELAXED);
           }
         } 
@@ -288,25 +280,22 @@ void CAN_RX_ISR (void) {
 void sendID(int boardID)
 {
   uint8_t TX_Message[8] = {0};
-  // send a "release" CAN message
   TX_Message[0] = 'I';
   TX_Message[1] = boardID;
   xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
 }
 
+// send press/release message
 void sendKeyPress(char action, int octave, int keyPressed)
 {
   uint8_t TX_Message[8] = {0};
   TX_Message[0] = action;
   TX_Message[1] = octave;
   TX_Message[2] = keyPressed;
-  Serial.print(action);
-  Serial.print(octave);
-  Serial.print(keyPressed);
-  Serial.print("\n");
   xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
 }
 
+// send end handshake message
 void sendEndHandshake()
 {
   uint8_t TX_Message[8] = {0};
@@ -317,7 +306,6 @@ void sendEndHandshake()
 // send a +N octave message
 void sendChangeOctave(int octaveChange)
 {
-  Serial.println(octaveChange);
   uint8_t TX_Message[8] = {0};
   TX_Message[0] = 'O';
   TX_Message[1] = octaveChange;
@@ -328,12 +316,12 @@ void sendChangeOctave(int octaveChange)
 void sendStereoBalance(int stereoBalance)
 {
   uint8_t TX_Message[8] = {0};
-  // send CAN message
   TX_Message[0] = 'B';
   TX_Message[1] = stereoBalance;
   xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
 }
 
+// moves amplitudes from double buffer to DAC
 void sampleISR()
 {
   static uint32_t readCtr = 0;
@@ -345,6 +333,7 @@ void sampleISR()
     xSemaphoreGiveFromISR(sampleBufferSemaphore, NULL);
   }
     
+  // switch between two halves of the buffer
   if (writeBuffer1)
   {
     HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, sampleBuffer0[readCtr++]);
@@ -372,7 +361,6 @@ void toggleSampleISR(bool on)
 }
 
 // task to check handshake inputs every 20ms
-// TODO: do we need to obtain mutex if we just read?
 void checkHandshakeTask(void * pvParameters)
 {
   // stores last state of east/west
@@ -414,15 +402,13 @@ void checkHandshakeTask(void * pvParameters)
         __atomic_store_n(&outBits[6], 0, __ATOMIC_RELAXED);
         setOutMuxBit(HKOE_BIT, LOW);
 
-        // break for 1.5 secs to allow east signal to propagate
+        // break for 250ms secs to allow east signal to propagate
         sysState.handshakePending = true;
         sysState.ID_RECV = -1;
         xSemaphoreGive(sysState.mutex);
-
         #ifndef TESTING
         vTaskDelay(pdMS_TO_TICKS(250));
         #endif
-
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         sysState.handshakePending = false;
 
@@ -430,21 +416,6 @@ void checkHandshakeTask(void * pvParameters)
         sendID(sysState.BOARD_ID+1);
       }
     }
-    // east HIGH to LOW
-    // else if(lastEast == 1 && eastDetect == 0)
-    // { 
-    //   // keyboard on right removed
-    //   // DO NOTHING
-    // }
-    // // west LOW to HIGH
-    // if(lastWest == 0 && westDetect == 1)
-    // {
-    //   // keyboard is plugged into left
-    //   // DO NOTHING HANDSHAKE HASNT STARTED
-    //   // OR
-    //   // signals being reset after after handshake
-    //   // DO NOTHING
-    // }
 
     // west HIGH to LOW
     // keyboard on left unplugged
@@ -453,47 +424,37 @@ void checkHandshakeTask(void * pvParameters)
     // this assumes we dont plug a keyboard in when the rest are in handshake mode (cos west would then be low)
     if((lastWest == 1 && westDetect == 0) || (lastWest == -1 && westDetect == 0))
     {
-      // keyboard on left unplugged
-      // START HANDSHAKE
-      // OR
-      // keyboard on left finished handshake
-      // START HANDSHAKE
-
       // turn east off
       __atomic_store_n(&outBits[6], 0, __ATOMIC_RELAXED);
       setOutMuxBit(HKOE_BIT, LOW);
 
-      // wait for CAN message to be received
-      // we yield CPU access so other tasks can run in this time
+      // wait for 250ms for CAN message to be received
       sysState.handshakePending = true;
       sysState.ID_RECV = -1;
       xSemaphoreGive(sysState.mutex);
-
-      //  TODO: how do we characterise this in a test?
-      // TODO: could probably remove this (or shorten it) if CAN_RX was a higher priority
       #ifndef TESTING
       vTaskDelay(pdMS_TO_TICKS(250));
       #endif
-
       xSemaphoreTake(sysState.mutex, portMAX_DELAY);
       sysState.handshakePending = false;
       
+      // set board parameters
       sysState.BOARD_ID = sysState.ID_RECV;
       sysState.sender = true;
       if(sysState.ID_RECV == -1) // this is the left-most board
       {
-        sysState.BOARD_ID = 0;
+        //sysState.BOARD_ID = 0;
+        sysState.BOARD_ID = sysState.startOctave;
         sysState.sender = false;
         sysState.rightBoard = false;
       }
       
+      // set board's octave
       knob3.setValue(sysState.BOARD_ID);
       sysState.octave = sysState.BOARD_ID;
       sysState.octaveOverride = true;
   
-      // send board it's new ID
-      // TODO: need to get rid of this
-      // delay(500);
+      // send next board it's new ID
       sendID(sysState.BOARD_ID+1);
 
       // if you are the rightmost board then finish the handshaking sequence
@@ -523,6 +484,7 @@ void checkHandshakeTask(void * pvParameters)
       #endif
       lastSender = sysState.sender;
     }
+
     lastWest = westDetect;
     lastEast = eastDetect;
 
@@ -538,14 +500,13 @@ void checkHandshakeTask(void * pvParameters)
 // -100 to 100 for each
 void readJoystick(int* horiz, int* vert)
 {  
-  // taskENTER_CRITICAL();
-
-  // Start ADC conversion for horizontal (X) axis
+  // complete adc conversions
   HAL_ADC_Start(&hadc1);
   int x_axis = HAL_ADC_GetValue(&hadc1); // right 500 left 3650
   int y_axis = HAL_ADC_GetValue(&hadc1); // 510 top 3510 bottom
   HAL_ADC_Stop(&hadc1);
 
+  // y-axis mappings
   y_axis = constrain(y_axis, 410, 3510);
   *vert = map(y_axis, 410, 3510, 100, -100);
   if(*vert < 10 && *vert > -10){ *vert = 0; }
@@ -553,8 +514,6 @@ void readJoystick(int* horiz, int* vert)
   // TODO: add deadzone to x axis
   x_axis = constrain(x_axis, 50, 3650);
   *horiz = map(x_axis, 50, 3650, 100, -100);
-
-  // taskEXIT_CRITICAL();
 }
 
 // task to check keys pressed runs every 20ms
@@ -589,9 +548,6 @@ void scanKeysTask(void * pvParameters)
     uint32_t currentStepSize_Local[2*CHANNELS] = {0};
 
     readJoystick(&joystick_horiz, &joystick_vert);
-    // TODO: needs bigger deadzone
-    // joystick_horiz = 0;
-    joystick_vert = 0;
 
     if(joystick_horiz != last_joystick_horiz)
     {
@@ -748,58 +704,6 @@ void scanKeysTask(void * pvParameters)
     for(int i = 0; i < CHANNELS; i++)
     {
       sysState.keyPressed[i] = keyPressedLocal[i];
-
-      // if((channelTimes[i] - releaseTimes[i]) > 100)
-      // {
-      //   sysState.keyPressed[i] = 0xFFFF;
-      // }
-
-      // // key is off
-      // // KEY IS TURNED OFF IN ADSR FUNCTION!
-      // if(keyPressedLocal[i] == 0xFFFF)
-      // {
-      //   // new release
-      //   if(sysState.keyPressed[i] != 0xFFFF)
-      //   {
-      //     if(releaseTimes[i] == 0)
-      //     {
-      //       releaseTimes[i] = channelTimes[i];
-      //       Serial.println("release");
-      //     }
-      //   }
-      // }
-
-      // // key is on
-      // else
-      // {
-      //   sysState.keyPressed[i] = keyPressedLocal[i];
-      // }
-
-      // if(keyPressedLocal[i] != 0xFFFF)
-      // {
-      //   sysState.keyPressed[i] = keyPressedLocal[i];
-      // }
-      // THIS NEVER TURNS KEYS OFF!!!
-
-
-
-      // sysState.keyPressed[i] = keyPressedLocal[i];
-
-      // if(sysState.reverb)
-      // {
-      //   if(keyPressedLocal[i] != 0xFFFF)
-      //   {
-      //     sysState.keyPressed[i] = keyPressedLocal[i];
-      //   }
-      //   else if(channelTimes[i] > DAMPER_RESOLUTION - 1)
-      //   {
-      //     sysState.keyPressed[i] = 0xFFFF;
-      //   }
-      // }
-      // else
-      // {
-      //   sysState.keyPressed[i] = keyPressedLocal[i];
-      // }
     }
 
     // convert key presses to step sizes (both internal and external)
@@ -932,17 +836,14 @@ void displayUpdateTask(void * pvParameters)
 }
 
 // scan TX mailbox and wait until a mailbox is available
-void sendCanTask (void * pvParameters) {
+void sendCanTask (void * pvParameters)
+{
 	uint8_t msgOut[8];
 	while (1)
   {
 		xQueueReceive(msgOutQ, msgOut, portMAX_DELAY);
-
 		xSemaphoreTake(CAN_TX_Semaphore, portMAX_DELAY);
-
 		CAN_TX(0x123, msgOut);
-
-    HAL_Delay(100);
 
     #ifdef TESTING
     break;
@@ -956,89 +857,13 @@ void CAN_TX_ISR (void)
 	xSemaphoreGiveFromISR(CAN_TX_Semaphore, NULL);
 }
 
-// outputs timing data every 5 seconds
-void TaskMonitor(void *pvParameters) {
-  char statsBuffer[512];
-
-  while (1) {
-      vTaskGetRunTimeStats(statsBuffer);
-      Serial.println("Task Execution Time Stats:");
-      Serial.println(statsBuffer);
-
-      vTaskDelay(pdMS_TO_TICKS(5000));  // Print stats every 5 seconds
-  }
-}
-
-// need to test different parameters for this
-// piano? / strings / guitar / drums
-// int attackTime = 20;    
-// int decayTime = 20;     
-// float sustainLevel = 1; // number from 0 to 1
-// int releaseTime = 200; 
-
-int attackTime = 0;    
-int decayTime = 0;     
-float sustainLevel = 1; // number from 0 to 1
-int releaseTime = 100;  
-
-// TODO: currently take 2ms!!! // make faster
-float applyADSR(int i)
-{
-  unsigned long currentTime = channelTimes[i];  
-  int envelope = 0;
-  float float_envelope = 0;
-
-  // key is in release stage
-  if(releaseTimes[i] > 0 )
-  {
-    float_envelope = (sustainLevel) - (sustainLevel * ((currentTime - releaseTimes[i]))/(releaseTime));
-    // float_envelope = (float)envelope / 100;
-    
-    // if((channelTimes[i] - releaseTimes[i]) > releaseTime)
-    // {
-    //   float_envelope = 0;
-    //   // turn key off
-    //   // TODO: does keyPressed and releaseTimes need atomic access?
-    //   sysState.keyPressed[i] = 0xFFFF;
-    //   releaseTimes[i] = 0;
-    // }
-  }
-  else
-  {
-    // attack: increase amp gradually 
-    if (currentTime < attackTime)
-    {
-      float_envelope = (float)currentTime / attackTime;  
-    }
-    // decay: decrease to sustain amp
-    else if (currentTime < attackTime + decayTime)
-    {
-      int decayProgress = currentTime - attackTime;
-      return 1.0f - (1.0f - sustainLevel) * ((float)decayProgress / decayTime);
-    }
-    // sustain 
-    else
-    {
-      float_envelope = sustainLevel;
-    }
-  }
-
-  // Ensure envelope stays within bounds (0 to 1)
-  if(float_envelope > 1) float_envelope = 1;
-  if(float_envelope < 0) float_envelope = 0;
-  return float_envelope;
-}
-
-
-// auto writes when buffer is available
+// writes amplitudes into the buffer
 void genBufferTask(void *pvParameters)
 {
-  // only 1 channel
   uint32_t phaseAcc[CHANNELS * 2] = {0};
-  int Vout = 0; //Calculate one sample
+  int Vout = 0; 
   int v_delta = 0;
   uint32_t lfoPhaseAcc = 0;
-  bool activeKeys;
 
   while(1)
   {
@@ -1050,53 +875,57 @@ void genBufferTask(void *pvParameters)
       v_delta = 0;
       Vout = 0;
 
-      // add LFO
-      lfoPhaseAcc += stepSizes[0];
-      int angle = (lfoPhaseAcc >> (32 - SINE_RESOLUTION_BITS)) & ((1 << SINE_RESOLUTION_BITS) - 1);
-      float vibrato = (float)sineLookup[angle] / 2048;
+      // // add LFO
+      // lfoPhaseAcc += stepSizes[0];
+      // int angle = (lfoPhaseAcc >> (32 - SINE_RESOLUTION_BITS)) & ((1 << SINE_RESOLUTION_BITS) - 1);
+      // float vibrato = (float)sineLookup[angle] / 2048;
 
       // loop through internal channels
       for (int i = 0; i < 2*CHANNELS; i++)
       {
         if (currentStepSize[i] == 0) { continue; };
 
-        activeKeys = true;
-
         // uint32_t step = currentStepSize[i] * (1.0f + vibrato * 0.05f);
         phaseAcc[i] += currentStepSize[i];
-        // phaseAcc[i] += currentStepSize[i];
 
-        // Generate waveform based on waveType
-        if (waveType == 0) // Sawtooth Wave
+        // sawtooth wave
+        if (waveType == 0)
         {
           v_delta = (phaseAcc[i] >> 20) - 2048;
         }
-        else if (waveType == 1) // Sine Wave
+        // sine wave
+        else if (waveType == 1)
         {
           uint32_t index = (phaseAcc[i] >> (32 - SINE_RESOLUTION_BITS)) & (SINE_RESOLUTION - 1);  
           v_delta = sineLookup[index];
         }
-        else if (waveType == 2) // Square Wave
+        // square wave
+        else if (waveType == 2)
         {
           v_delta = (phaseAcc[i] > (1 << 31)) ? 2047 : -2048;
         }
 
-        //Vout += v_delta * applyADSR(i);
+        // apply ADSR filtering
+        if(channelTimes[i] < varTime){ Vout += v_delta * adsrLookup[channelTimes[i]]; }
+        else { Vout += v_delta * sustainLevel; }
+
         Vout += v_delta;
       }
       
-      // Apply volume control using logarithmic tapering
+      // apply volume control using logarithmic tapering
       Vout = Vout >> (12 - sysState.volume);
 
-      // Normalize the volume when multiple keys are pressed
+      // normalize the volume when multiple keys are pressed
       // if (activeKeys > 0) {
       //   Vout /= activeKeys;
       // }
 
+      // prevent clipping
       Vout += 2048;
-      // if (Vout > 4095) Vout = 4095;
-      // if (Vout < 0) Vout = 0;
+      if (Vout > 4095) Vout = 4095;
+      if (Vout < 0) Vout = 0;
 
+      // write to buffers
       if (writeBuffer1)
       {
         sampleBuffer1[writeCtr] = Vout;
@@ -1113,40 +942,7 @@ void genBufferTask(void *pvParameters)
   }
 }
 
-void MX_GPIO_Init(void)
-{
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-    /* Configure PB7 as Output */
-    GPIO_InitStruct.Pin = GPIO_PIN_7;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-}
-
-void MX_DMA_Init(void)
-{
-  __HAL_RCC_DMA1_CLK_ENABLE();
-
-  // Configure DMA for DAC channel 1.
-  hdma_dac1.Instance = DMA1_Channel3;
-  // hdma_dac1.Init.Request = DMA_REQUEST_1; // This now resolves to DMA_REQUEST_1 if not defined
-  hdma_dac1.Init.Direction = DMA_MEMORY_TO_PERIPH;
-  hdma_dac1.Init.PeriphInc = DMA_PINC_DISABLE;
-  hdma_dac1.Init.MemInc = DMA_MINC_ENABLE;
-  hdma_dac1.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
-  hdma_dac1.Init.MemDataAlignment = DMA_MDATAALIGN_HALFWORD;
-  hdma_dac1.Init.Mode = DMA_CIRCULAR;
-  hdma_dac1.Init.Priority = DMA_PRIORITY_HIGH;
-
-  HAL_DMA_Init(&hdma_dac1);
-
-  // Link the DMA handle to the DAC handle.
-  __HAL_LINKDMA(&hdac, DMA_Handle1, hdma_dac1);
-}
-
+// init TIM2 timer used for triggering DAC
 void MX_TIM2_Init(void)
 {
     /* Enable TIM2 Clock */
@@ -1176,6 +972,7 @@ void MX_TIM2_Init(void)
     }
 }
 
+// init DAC
 void MX_DAC_Init(void)
 {
     /* Enable DAC Clock */
@@ -1199,6 +996,7 @@ void MX_DAC_Init(void)
     }
 }
 
+// init ADC
 void MX_ADC1_Init(void)
 {
 
@@ -1265,13 +1063,6 @@ void MX_ADC1_Init(void)
 
 }
 
-// extern "C" void TIM2_IRQHandler(void) {
-//   if (__HAL_TIM_GET_FLAG(&htim2, TIM_FLAG_UPDATE) != RESET) {
-//       __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
-//       Serial.println("TIM2 event triggered!\n");
-//   }
-// }
-
 void setup()
 {
   Serial.begin(9600);
@@ -1279,17 +1070,9 @@ void setup()
   
   HAL_Init();
 
- // init();
-
-  //MX_GPIO_Init();
-  // MX_DMA_Init();
   MX_DAC_Init();
   MX_TIM2_Init();
   MX_ADC1_Init();
-  
-  // Enable Timer interrupt (TIM7)
-  // HAL_NVIC_SetPriority(TIM2_IRQn, 0, 1);
-  // HAL_NVIC_EnableIRQ(TIM2_IRQn);
 
   HAL_TIM_Base_Start(&htim2);
   TIM2->EGR |= TIM_EGR_UG;
@@ -1329,7 +1112,7 @@ void setup()
   "scanKeys",		/* Text name for the task */
   512,      		/* Stack size in words, not bytes */
   NULL,			/* Parameter passed into the task */
-  2,			/* Task priority */
+  3,			/* Task priority */
   &scanKeysHandle );	/* Pointer to store the task handle */
 
   // start screen update thread
@@ -1351,7 +1134,7 @@ void setup()
   "receiveCan",		/* Text name for the task */
   256,      		/* Stack size in words, not bytes */
   NULL,			/* Parameter passed into the task */
-  3,			/* Task priority */
+  4,			/* Task priority */
   &receiveCan );	/* Pointer to store the task handle */
 
   TaskHandle_t sendCan = NULL;
@@ -1360,7 +1143,7 @@ void setup()
   "sendCan",		/* Text name for the task */
   256,      		/* Stack size in words, not bytes */
   NULL,			/* Parameter passed into the task */
-  3,			/* Task priority */
+  4,			/* Task priority */
   &sendCan );	/* Pointer to store the task handle */
 
   TaskHandle_t checkHandshake = NULL;
@@ -1369,7 +1152,7 @@ void setup()
   "checkHandshake",		/* Text name for the task */
   256,      		/* Stack size in words, not bytes */
   NULL,			/* Parameter passed into the task */
-  3,			/* Task priority */
+  2,			/* Task priority */
   &checkHandshake );	/* Pointer to store the task handle */
 
   TaskHandle_t genBuffer = NULL;
@@ -1380,22 +1163,20 @@ void setup()
   NULL,			/* Parameter passed into the task */
   5,			/* Task priority */
   &genBuffer );	/* Pointer to store the task handle */
-  
-  // Create the monitor task
-  // xTaskCreate(TaskMonitor, "Monitor", 2000, NULL, 1, NULL);
 
   #endif
 
   // compute sine values for lookup table
-  //sineLookup[phase] = std::round(2048 * std::sin((2*M_PI*phase)/SINE_RESOLUTION));
   for (uint32_t phase = 0; phase < SINE_RESOLUTION; ++phase)
   {
-      // Convert index to angle in radians (0 to 2pi)
+      // convert index to angle in radians (0 to 2pi)
       float angle = (2.0f * M_PI * phase) / SINE_RESOLUTION;
-
-      // Scale sine value to fit int16_t range (-2048 to 2047)
+      // scale sine value to fit int16_t range (-2048 to 2047)
       sineLookup[phase] = static_cast<int16_t>(std::round(std::sin(angle) * 2047));
   }
+
+  // compute AD of ADSR lookup table
+  generateAdsrLookup(attackTime, decayTime);
 
   //Set pin directions
   pinMode(RA0_PIN, OUTPUT);
@@ -1412,10 +1193,6 @@ void setup()
   pinMode(C2_PIN, INPUT);
   pinMode(C3_PIN, INPUT);
 
-  // disable because we use ADC
-  // pinMode(JOYX_PIN, INPUT);
-  // pinMode(JOYY_PIN, INPUT);
-
   //Initialise display
   setOutMuxBit(DRST_BIT, LOW);  //Assert display logic reset
   delayMicroseconds(2);
@@ -1430,11 +1207,14 @@ void setup()
   // allows east/west signals to stabilise before they are read (IMPORTANT)
   delay(100);
 
-  //Initialise UART
-  // Serial.begin(9600);
-
   // init CAN bus
+  #ifdef TESTING
+  CAN_Init(true);
+  #endif
+  #ifndef TESTING
   CAN_Init(false); // true means it reads it's OWN CAN output
+  #endif
+  
   setCANFilter(0x123,0x7ff);
 
   #ifndef TESTING
@@ -1447,7 +1227,6 @@ void setup()
 
   CAN_Start();
 
-
   #ifndef TESTING
   // start RTOS scheduler
   vTaskStartScheduler();
@@ -1458,7 +1237,7 @@ void setup()
   test_sampleISR();
   test_receiveCanTask();
   test_displayUpdateTask();
-  //test_sendCanTask();
+  test_sendCanTask();
   test_scanKeysTask();
   test_genBufferTask();
   test_checkHandshakeTask();

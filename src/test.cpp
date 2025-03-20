@@ -132,16 +132,17 @@ void test_sendCanTask()
   // init worst possible test case here...
   
   // define 32 input messages
-  msgOutQ = xQueueCreate(320,8);
+  msgOutQ = xQueueCreate(32,8);
   uint8_t TX_Message_ISR[8];
   TX_Message_ISR[0] = 'P';
   TX_Message_ISR[1] = 1;
   TX_Message_ISR[2] = 1;
+
   for(int i = 0; i < 32; i++)
   {
     xQueueSend(msgOutQ, TX_Message_ISR, NULL);
   }
-
+  
   // benchmark
   uint32_t startTime = micros();
   for (int iter = 0; iter < 32; iter++)

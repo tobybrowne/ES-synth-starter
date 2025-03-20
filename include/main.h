@@ -26,6 +26,8 @@ struct SysState
 
     int ID_RECV = -1;
 
+    int startOctave = 3;
+
     bool octaveOverride = false;
 
     SemaphoreHandle_t mutex; 
