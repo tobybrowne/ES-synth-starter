@@ -5,7 +5,7 @@
 #include <STM32FreeRTOS.h>
 
 // how many keys can be pressed together
-const int CHANNELS = 4;
+const int CHANNELS = 5;
 
 // stores device state
 struct SysState
